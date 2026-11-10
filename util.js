@@ -1,4 +1,5 @@
-export const normRef = s => String(s ?? '').toUpperCase().replace(/[\s.\-_/]/g, '');
+// Solo letras y números: quita espacios, puntos, guiones y también caracteres invisibles que algunos PDF meten dentro del código
+export const normRef = s => String(s ?? '').normalize('NFKD').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
 export const normText = s => String(s ?? '')
   .toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')

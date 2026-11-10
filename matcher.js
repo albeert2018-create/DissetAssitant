@@ -37,7 +37,11 @@ export class Matcher {
         const v = this.cat.variants[c.vi];
         if (v && v.refNorm === c.refNorm) return this.res(v, 0.97, `Corrección guardada: ${line.ref} → ${v.ref}`);
       }
-      const exact = this.cat.byRef.get(ref);
+      let exact = this.cat.byRef.get(ref);
+      if (!exact) {   // confusiones típicas de OCR o de tecleo: O↔0, I/L↔1 en la parte numérica
+        const alt = ref.replace(/(?<=\d)[OIL]|[OIL](?=\d)/g, ch => ({ O: '0', I: '1', L: '1' })[ch]);
+        if (alt !== ref) exact = this.cat.byRef.get(alt);
+      }
       if (exact) {
         const fichas = new Set(exact.map(v => v.pi));
         const v = this.pick(exact, tq);
