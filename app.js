@@ -8,6 +8,7 @@ import { Mascot } from './mascot.js';
 import { CrossSell } from './crosssell.js';
 import * as auth from './auth.js';
 import { queue, flush, fetchRules } from './sync.js';
+import { demoData, serverData, renderPanel } from './panel.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const view = $('#view');
@@ -59,6 +60,8 @@ async function init() {
     syncNow();
   }
   userChip();
+  const pn = $('a[data-nav=panel]');
+  if (pn) { pn.hidden = remote && !auth.isAdmin(me); if (!remote) pn.textContent = 'Dirección (demo)'; }
   window.addEventListener('hashchange', route);
   document.addEventListener('paste', onPaste);
   $('#btn-ajustes').addEventListener('click', openSettings);
@@ -183,6 +186,7 @@ function route() {
   if ((m = h.match(/^#\/q\/([\w-]+)/))) return showLines(m[1]);
   if (h.startsWith('#/historial')) return showHistory();
   if (h.startsWith('#/agenda')) return showAgenda();
+  if (h.startsWith('#/panel')) return showPanel();
   return showHome();
 }
 function nav(active) {
@@ -470,6 +474,26 @@ function showSentPrompt() {
     : quote.catalogs ? `<button class="btn ghost" id="mark-sent">Marcar como enviado al cliente</button>` : '';
   const b = $('#mark-sent');
   if (b) b.onclick = async () => { quote.status = 'enviado'; quote.agenda = { ...(quote.agenda || {}), enviadoEl: hoy() }; if (!pendiente(quote)) programar(quote, 'llamada', 3); await persist(); mixa.say(`Enviado. Te he programado la 1ª llamada para el ${fmt(pendiente(quote).fecha)}.`); showSentPrompt(); };
+}
+
+// ── Panel de dirección (Fase 6) ───────────────────────────────────────────
+async function showPanel() {
+  nav('panel'); document.title = 'Panel de dirección · Disset Odiseo';
+  mixa.setPhrases(['Lo que no se mide, no se mejora. Ni se vende.', '«Añadida al catálogo» no es venta cerrada. Que no te engañe el gato.']);
+  if (remote && !auth.isAdmin(me)) { view.innerHTML = '<div class="card"><p>Esta sección es solo para dirección y administración.</p></div>'; return; }
+  view.innerHTML = `<div class="loading"><div class="spinner"></div>Cargando panel…</div>`;
+  let D;
+  try { D = remote ? await serverData(cat) : demoData(cat); }
+  catch (e) { view.innerHTML = `<div class="card err">No se pudo cargar el panel: ${esc(e.message)}</div>`; return; }
+  renderPanel(view, D, cat, { onPublish: remote ? publicarPotenciales : null });
+}
+async function publicarPotenciales(sel) {
+  const NOM = { 1: 'Tarjeta 1', 3: 'Tarjeta 3' };
+  const potenciales = sel.map(s => ({ slot: s.slot, nombre: NOM[s.slot], familias: s.fams.join(' / '), criterio: 'Publicado desde el panel de dirección' }));
+  const c = auth.sb();
+  let r = await c.from('rule_sets').update({ is_current: false }).eq('is_current', true); if (r.error) throw r.error;
+  r = await c.from('rule_sets').insert({ version: new Date().toISOString(), payload: { potenciales }, is_current: true }); if (r.error) throw r.error;
+  cat.potenciales = potenciales; xs = null;
 }
 
 // ── Agenda comercial: estados, próximas acciones encadenadas y recordatorios ─────────
