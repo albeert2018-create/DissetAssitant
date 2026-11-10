@@ -1,6 +1,6 @@
 // Service worker: la app y sus librerías funcionan sin conexión. Las fotos de dissetodiseo.com se guardan al verlas.
 // Al publicar una versión nueva solo cambia VERSION: los presupuestos y el aprendizaje (IndexedDB) no se tocan.
-const VERSION = 'v0.6.0';
+const VERSION = 'v0.6.2';
 const SHELL = `shell-${VERSION}`, IMG = 'img-disset';
 const FILES = ['./', 'index.html', 'app.css', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png',
   'app.js', 'db.js', 'util.js', 'catalog.js', 'matcher.js', 'reader.js', 'ocr.js', 'layout.js', 'mascot.js', 'crosssell.js', 'config.js', 'auth.js', 'sync.js', 'panel.js', 'supabase.js',

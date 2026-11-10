@@ -26,6 +26,10 @@ const HEAD_KEYS = {
 };
 
 const isPersonal = t => PERSONAL.some(r => r.test(t));
+// Zona de productos: entre la fila de títulos de la tabla (Artículo · Descripción · Cant.) y el pie (pago, portes, validez…)
+const isHeaderRow = t => HEAD_KEYS.ref.test(t) && (HEAD_KEYS.desc.test(t) || HEAD_KEYS.qty.test(t)) && t.length < 140;
+const END = /^\s*(forma de pago|pago\s*:|portes\s*:|plazo( de)? entrega|validez|observaciones|i\.?v\.?a\.? no incluido|base imponible|total (presupuesto|oferta|neto)|los datos facilitados|condiciones generales)/i;
+const LEGAL = /\b(r\.?m\.?|registro mercantil|tomo|folio|inscripci[oó]n|hoja)\b.*\d/i;
 // Importes, porcentajes y € fuera de cualquier texto (también en lecturas OCR, donde no hay columnas)
 const MONEY_ANY = [/-?\d{1,3}(?:[.\s]\d{3})*,\d{1,2}\s*€?/g, /-?\d+(?:[.,]\d{1,2})?\s*€/g, /€\s*-?\d[\d.,]*/g, /-?\d+(?:[.,]\d+)?\s*%/g, /€/g];
 const stripMoney = t => { let o = t; MONEY_ANY.forEach(r => { o = o.replace(r, ' '); }); return o.replace(/\s+/g, ' ').trim(); };
@@ -127,7 +131,7 @@ function dropRepeated(pages, cat) {
   let removed = 0;
   const rows = pages.flat().filter(r => {
     const k = r.text.replace(/\d+/g, '#');
-    if (rep.has(k) && zona.get(r) && !OPTION.test(r.text) && !conRef(r)) { removed++; return false; }
+    if (rep.has(k) && zona.get(r) && !OPTION.test(r.text) && !conRef(r) && !isHeaderRow(r.text)) { removed++; return false; }
     if (/^p[aá]g(ina)?\.?\s*#/i.test(k) || /^#\s*(\/|de)\s*#$/.test(k)) { removed++; return false; }
     return true;
   });
@@ -175,7 +179,17 @@ function parse(rows, cat, cols) {
   const out = { lines: [], discarded: 0, personal: 0 };
   let group = '', started = false, last = null, headerSeen = !cols;
   const refCol = cols?.ref, qtyCol = cols?.qty;
+  const zonas = rows.some(r => isHeaderRow(r.text));   // si el documento tiene tabla, fuera de ella no hay productos
+  let dentro = !zonas, pagina = rows[0]?.page;
+  const conTabla = new Set(rows.filter(r => isHeaderRow(r.text)).map(r => r.page));
   for (const row of rows) {
+    if (zonas && row.page !== pagina) { pagina = row.page; if (conTabla.has(pagina)) { dentro = false; last = null; } }   // página con tabla propia: empieza fuera
+    if (zonas) {
+      if (isHeaderRow(row.text)) { dentro = true; if (!cols) continue; }
+      else if (END.test(row.text)) { dentro = false; last = null; continue; }
+      if (!dentro) continue;
+    }
+    if (LEGAL.test(row.text)) { last = null; continue; }
     let cells = row.cells.map(c => ({ ...c }));
     if (cols) {
       if (row === cols.headerRow) { headerSeen = true; continue; }
@@ -234,8 +248,22 @@ function detectColumns(rows) {
 }
 
 function meta(rows) {
-  const all = rows.slice(0, 60).map(r => r.text).join('\n');
-  const offer = (all.match(/\b(?:oferta|presupuesto|pedido|proforma)\s*(?:n\W{0,3}|num\.?|n[uú]mero)?\W{0,3}([A-Z]{0,5}[-/]?\d[\w\-/]{2,18})/i) || [])[1] || '';
+  const top = rows.slice(0, 70);
+  const all = top.filter(r => !/validez|v[aá]lido hasta|vencimiento/i.test(r.text)).map(r => r.text).join('\n');
+  let offer = '';
+  // «Nº OFERTA» como título y el número debajo, en la misma columna (formato del programa de Disset)
+  for (let i = 0; i < top.length && !offer; i++) {
+    const c = top[i].cells?.find(c => /\bn[ºo°.]?\s*(de\s+)?(oferta|presupuesto|pedido)\b/i.test(c.text) && c.text.length < 25);
+    if (!c) continue;
+    for (const r of top.slice(i + 1, i + 3)) {
+      const v = r.cells?.find(x => Math.abs(x.x - c.x) < 30);
+      if (v && /^[A-Z]{0,4}\d{0,2}[\s\-/]?\d{3,}[\w\-/]*$/i.test(v.text.trim()) && !/^\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}$/.test(v.text.trim())) { offer = v.text.trim(); break; }
+    }
+  }
+  if (!offer) {
+    const m = all.match(/\b(?:oferta|presupuesto|pedido|proforma)\s*(?:n\W{0,3}|num\.?|n[uú]mero)?\W{0,3}([A-Z]{0,5}[-/]?\d[\w\-/]{2,18})/i);
+    if (m && !/^\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}$/.test(m[1])) offer = m[1];
+  }
   const d = all.match(/\b(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})\b/);
   const date = d ? `${d[1].padStart(2, '0')}/${d[2].padStart(2, '0')}/${d[3].length === 2 ? '20' + d[3] : d[3]}` : '';
   return { offer, date };

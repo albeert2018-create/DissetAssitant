@@ -1,7 +1,7 @@
 import { db, saveQuote, exportBackup, importBackup, MAX_QUOTES } from './db.js';
 import { esc, uuid, normRef } from './util.js';
 import { Catalog } from './catalog.js';
-import { Matcher, STATUS } from './matcher.js';
+import { Matcher, STATUS, correctionKey } from './matcher.js';
 import { readQuote } from './reader.js';
 import { renderCatalog } from './layout.js';
 import { Mascot } from './mascot.js';
@@ -274,7 +274,8 @@ async function showLines(id) {
   nav(''); if (!(await load(id))) return (location.hash = '#/');
   const c = { seguro: 0, revisar: 0, sin_ficha: 0 };
   quote.lines.forEach(l => c[l.match.status]++);
-  mixa.setPhrases(c.revisar ? [`Hay ${c.revisar} por confirmar. Míralas antes de enviar.`, ...FRASES.lines] : ['¡Todo identificado! Así da gusto.', ...FRASES.lines]);
+  mixa.setPhrases(c.revisar ? [`Hay ${c.revisar} por confirmar. Míralas antes de enviar.`, ...FRASES.lines]
+    : c.sin_ficha ? [`${c.sin_ficha} sin ficha. Si alguna existe en la web, «Corregir» y la aprendo.`, ...FRASES.lines] : ['¡Todo identificado! Así da gusto.', ...FRASES.lines]);
   document.title = `Oferta ${quote.offer || ''} · líneas`;
   let group = null;
   const rows = quote.lines.map(l => {
@@ -337,7 +338,7 @@ async function onLineClick(e) {
   if (act === 'pick') {
     const pi = +b.dataset.pi, vi = b.dataset.vi === '' ? null : +b.dataset.vi;
     const v = vi != null ? cat.variants[vi] : null;
-    if (l.ref && v) { await matcher.learn(l.ref, v); if (remote) await queue.learn('correccion', normRef(l.ref), { ref: v.ref, ficha: cat.product(v.pi).id }); }
+    if (l.ref && v) { await matcher.learn(l, v); if (remote) await queue.learn('correccion', correctionKey(l), { ref: v.ref, ficha: cat.product(v.pi).id }); }
     l.match = { pi, vi, confidence: 1, why: 'Corregido por el comercial', status: STATUS.OK };
     if (!l.ref && v) l.ref = v.ref;
     openFix = null; touchLines(); await persist(); mixa.say('Apuntado. La próxima vez esa la clavo yo solita.');
