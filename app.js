@@ -194,6 +194,7 @@ async function showHome() {
   nav('home'); mixa.setPhrases(FRASES.home); document.title = 'Disset Odiseo · Asistente comercial';
   const recent = (await db.all('quotes')).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 4);
   const shop = cat.showcase(14);
+  const pend = (await recordatorios()).filter(x => x.t.fecha <= hoy());
   view.innerHTML = `
   <section class="hero">
     <p class="kicker">Paso 1 · Presupuesto</p>
@@ -210,6 +211,7 @@ async function showHome() {
   </section>
   <section class="showcase" aria-label="Escaparate"><div class="track">${[...shop, ...shop].map(p => `
     <a class="tile" href="${esc(p.url)}" target="_blank" rel="noopener"><span class="tile-img"><img src="${esc(p.photo)}" alt="" loading="lazy" referrerpolicy="no-referrer"></span><span>${esc(p.name)}</span></a>`).join('')}</div></section>
+  ${pend.length ? `<a class="card rec-home" href="#/agenda"><b>Hoy tienes ${pend.length} seguimiento${pend.length > 1 ? 's' : ''}</b><span>${pend.slice(0, 3).map(x => `${nombreTarea(x.q, x.t)} · Oferta ${esc(x.q.offer || 'sin número')}`).join(' · ')}</span><span class="accent">Ver agenda ›</span></a>` : ''}
   ${recent.length ? `<section class="card recent"><h2>Seguir donde lo dejé</h2>${recent.map(q => `
     <a class="recent-row" href="#/q/${q.id}"><span>Oferta ${esc(q.offer || 'sin número')} <span class="muted">· ${esc(q.date || '')}</span></span><span class="muted">${q.lines.length} líneas</span></a>`).join('')}</section>` : ''}`;
   const drop = $('#drop'), input = $('#file');
@@ -467,60 +469,135 @@ function showSentPrompt() {
   box.innerHTML = done ? `<span class="muted small">Estado: <b>${QST[quote.status]}</b> · <a href="#/agenda">Ver agenda</a></span>`
     : quote.catalogs ? `<button class="btn ghost" id="mark-sent">Marcar como enviado al cliente</button>` : '';
   const b = $('#mark-sent');
-  if (b) b.onclick = async () => { quote.status = 'enviado'; quote.agenda = { ...(quote.agenda || {}), enviadoEl: new Date().toISOString().slice(0, 10) }; await persist(); mixa.say('Enviado. Te lo dejo en la agenda para el seguimiento.'); showSentPrompt(); };
+  if (b) b.onclick = async () => { quote.status = 'enviado'; quote.agenda = { ...(quote.agenda || {}), enviadoEl: hoy() }; if (!pendiente(quote)) programar(quote, 'llamada', 3); await persist(); mixa.say(`Enviado. Te he programado la 1ª llamada para el ${fmt(pendiente(quote).fecha)}.`); showSentPrompt(); };
 }
 
-// ── Agenda comercial ──────────────────────────────────────────────────────
+// ── Agenda comercial: estados, próximas acciones encadenadas y recordatorios ─────────
 let agendaFiltro = 'activos';
-const hoy = () => new Date().toISOString().slice(0, 10);
+const TIPOS = { llamada: 'llamada', email: 'email', visita: 'visita' };
+const hoy = () => isoLocal(new Date());
+function isoLocal(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+/** Suma días naturales y, si cae en fin de semana, pasa al lunes */
+function masDias(desde, n) {
+  const d = new Date((desde || hoy()) + 'T12:00:00'); d.setDate(d.getDate() + n);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  return isoLocal(d);
+}
+const fmt = f => f ? f.split('-').reverse().join('/') : '';
+const cerrado = q => ['aceptado', 'perdido'].includes(q.status);
+function tareas(q) {
+  const a = (q.agenda ||= {});
+  if (!a.tareas) { a.tareas = []; if (a.seguimiento) a.tareas.push({ id: uuid(), tipo: 'llamada', fecha: a.seguimiento, hecha: false }); }
+  return a.tareas;
+}
+const pendiente = q => tareas(q).find(t => !t.hecha) || null;
+const nombreTarea = (q, t) => `${tareas(q).filter(x => x.tipo === t.tipo).indexOf(t) + 1}ª ${TIPOS[t.tipo]}`;
+/** Mantiene el campo que se sincroniza (próxima fecha) */
+function syncSeg(q) {
+  const p = pendiente(q);
+  q.agenda.seguimiento = p && !cerrado(q) ? p.fecha : null;
+  q.agenda.siguiente = p && !cerrado(q) ? p.tipo : null;
+  q.agenda.hechas = tareas(q).filter(t => t.hecha).length;
+}
+function programar(q, tipo = 'llamada', dias = q.agenda?.intervalo || 3) {
+  tareas(q).push({ id: uuid(), tipo, fecha: masDias(hoy(), dias), hecha: false });
+  syncSeg(q);
+}
+
+/** Recordatorios de todos los presupuestos abiertos, por día */
+async function recordatorios() {
+  const qs = await db.all('quotes');
+  return qs.filter(q => !cerrado(q)).map(q => ({ q, t: pendiente(q) })).filter(x => x.t).sort((a, b) => a.t.fecha.localeCompare(b.t.fecha));
+}
+function cuando(f) {
+  const h = hoy(), m = isoLocal(new Date(new Date(h + 'T12:00').getTime() + 864e5));
+  const sem = isoLocal(new Date(new Date(h + 'T12:00').getTime() + 7 * 864e5));
+  return f < h ? 'Atrasadas' : f === h ? 'Hoy' : f === m ? 'Mañana' : f <= sem ? 'Esta semana' : 'Más adelante';
+}
+
 async function showAgenda() {
   nav('agenda'); mixa.setPhrases(FRASES.agenda); document.title = 'Mi agenda · Disset Odiseo';
   const qs = (await db.all('quotes')).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   const grupo = q => AGENDA_ST.includes(q.status) ? q.status : 'por_enviar';
-  const n = k => qs.filter(q => k === 'activos' ? !['aceptado', 'perdido'].includes(q.status) : grupo(q) === k).length;
-  const avisos = qs.filter(q => q.agenda?.seguimiento && q.agenda.seguimiento <= hoy() && !['aceptado', 'perdido'].includes(q.status));
-  const lista = qs.filter(q => agendaFiltro === 'activos' ? !['aceptado', 'perdido'].includes(q.status) : grupo(q) === agendaFiltro);
+  const n = k => qs.filter(q => k === 'activos' ? !cerrado(q) : grupo(q) === k).length;
+  const lista = qs.filter(q => agendaFiltro === 'activos' ? !cerrado(q) : grupo(q) === agendaFiltro);
+  const rec = await recordatorios();
+  const G = ['Atrasadas', 'Hoy', 'Mañana', 'Esta semana', 'Más adelante'];
+  const porDia = G.map(g => [g, rec.filter(x => cuando(x.t.fecha) === g)]).filter(([, xs]) => xs.length);
   const FIL = [['activos', 'Abiertos'], ['por_enviar', 'Por enviar'], ['enviado', 'Enviados'], ['negociando', 'Negociándose'], ['aceptado', 'Aceptados'], ['perdido', 'Perdidos']];
   view.innerHTML = `<div class="bar"><div><p class="kicker">Seguimiento comercial</p><h1>Mi agenda</h1>
     <p class="muted">${n('enviado')} enviados · ${n('negociando')} negociándose · ${n('aceptado')} aceptados · ${n('perdido')} perdidos</p></div>
-    <div class="bar-actions">${remote ? '<span class="muted small">Dirección ve estado y fechas; el cliente y el importe solo si marcas «compartir».</span>' : '<span class="muted small">Se guarda en este ordenador.</span>'}</div></div>
-    ${avisos.length ? `<div class="card ag-alert"><b>${avisos.length} seguimiento${avisos.length > 1 ? 's' : ''} para hoy o atrasado${avisos.length > 1 ? 's' : ''}:</b> ${avisos.map(q => `<a href="#ag-${q.id}">${esc(q.offer || 'sin número')}${q.agenda?.cliente ? ' · ' + esc(q.agenda.cliente) : ''}</a>`).join(' · ')}</div>` : ''}
+    <div class="bar-actions">${remote ? '<span class="muted small">Dirección ve estados y fechas; el cliente y el importe solo si marcas «compartir».</span>' : '<span class="muted small">Se guarda en este ordenador.</span>'}</div></div>
+    <section class="card rec" aria-label="Recordatorios"><h2>Recordatorios</h2>
+      ${porDia.length ? porDia.map(([g, xs]) => `<div class="rec-g"><h3 class="${g === 'Atrasadas' ? 'late' : g === 'Hoy' ? 'today' : ''}">${g} <span>${xs.length}</span></h3>
+        ${xs.map(({ q, t }) => `<div class="rec-i" data-id="${q.id}" data-t="${t.id}"><span class="rec-d">${fmt(t.fecha)}</span>
+          <span class="rec-what"><b>${nombreTarea(q, t)}</b> · <a href="#ag-${q.id}" data-go="${q.id}">Oferta ${esc(q.offer || 'sin número')}</a>${q.agenda?.cliente ? ' · ' + esc(q.agenda.cliente) : ''}</span>
+          <span class="pill ${q.status === 'negociando' ? 'pill-warn' : 'pill-none'}">${QST[q.status] || ''}</span>
+          <button class="btn ghost xs-small" data-act="hecha">✓ Hecha</button></div>`).join('')}</div>`).join('')
+      : '<p class="muted">No tienes acciones pendientes. Marca un presupuesto como «Enviado» y te programo la primera llamada.</p>'}
+    </section>
     <div class="chips" role="tablist">${FIL.map(([k, t]) => `<button role="tab" class="chip${agendaFiltro === k ? ' on' : ''}" aria-selected="${agendaFiltro === k}" data-f="${k}">${t} <span>${n(k)}</span></button>`).join('')}</div>
     <div class="ag-list">${lista.length ? lista.map(agRow).join('') : '<div class="card"><p class="muted">Nada por aquí.</p></div>'}</div>`;
   view.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { agendaFiltro = b.dataset.f; showAgenda(); });
+  view.querySelectorAll('[data-go]').forEach(a => a.onclick = e => { e.preventDefault(); agendaFiltro = 'activos'; document.getElementById('ag-' + a.dataset.go)?.scrollIntoView({ behavior: 'smooth' }); });
+  view.querySelector('.rec').addEventListener('click', agClick);
   view.querySelector('.ag-list').addEventListener('click', agClick);
   view.querySelector('.ag-list').addEventListener('change', agChange);
 }
 function agRow(q) {
-  const a = q.agenda || {}, tarde = a.seguimiento && a.seguimiento <= hoy() && !['aceptado', 'perdido'].includes(q.status);
+  const a = q.agenda || {}, t = pendiente(q), hechas = tareas(q).filter(x => x.hecha);
+  const tarde = t && t.fecha < hoy() && !cerrado(q);
   return `<article class="card ag-row" id="ag-${q.id}" data-id="${q.id}">
     <div class="ag-head"><a class="ag-title" href="#/q/${q.id}">Oferta ${esc(q.offer || 'sin número')}</a>
       <span class="muted small">${esc(q.date || '')} · ${q.lines.filter(l => l.include !== false).length} líneas${q.extras?.length ? ` · ${q.extras.length} de venta cruzada` : ''}</span>
-      <span class="pill ${['aceptado'].includes(q.status) ? 'pill-ok' : q.status === 'perdido' ? 'pill-none' : 'pill-warn'}">${QST[q.status] || q.status}</span></div>
+      <span class="pill ${q.status === 'aceptado' ? 'pill-ok' : q.status === 'perdido' ? 'pill-none' : 'pill-warn'}">${QST[q.status] || q.status}</span></div>
     <div class="ag-st" role="group" aria-label="Estado">${AGENDA_ST.map(s => `<button class="seg${q.status === s ? ' on' : ''}" data-st="${s}" aria-pressed="${q.status === s}">${QST[s]}</button>`).join('')}</div>
+    ${cerrado(q) ? '' : t ? `<div class="ag-next${tarde ? ' late' : ''}" data-t="${t.id}"><span class="ag-lbl">Próxima acción: <b>${nombreTarea(q, t)}</b></span>
+        <select data-k="tipo" aria-label="Tipo">${Object.keys(TIPOS).map(k => `<option value="${k}"${k === t.tipo ? ' selected' : ''}>${k[0].toUpperCase() + k.slice(1)}</option>`).join('')}</select>
+        <input type="date" data-k="fecha" value="${t.fecha}" aria-label="Fecha">
+        <button class="btn" data-act="hecha">✓ Hecha</button>
+        <label class="ag-chk">Siguiente a los <select data-k="intervalo">${[2, 3, 5, 7, 10, 15].map(d => `<option${d === (a.intervalo || 3) ? ' selected' : ''}>${d}</option>`).join('')}</select> días</label></div>`
+      : `<div class="ag-next"><span class="ag-lbl muted">Sin acción pendiente</span><button class="btn ghost" data-act="nueva">+ Programar llamada</button></div>`}
+    ${hechas.length ? `<div class="ag-hist">${hechas.map(h => `<span class="done">✓ ${nombreTarea(q, h)} · ${fmt(h.hechaEl || h.fecha)}</span>`).join('')}</div>` : ''}
     <div class="ag-fields">
       <label class="fld-col">Cliente<input data-k="cliente" value="${esc(a.cliente || '')}" maxlength="80" placeholder="Solo en este ordenador"></label>
       <label class="ag-chk"><input type="checkbox" data-k="compartirCliente" ${a.compartirCliente ? 'checked' : ''}> Compartir con dirección</label>
-      <label class="fld-col">Próximo seguimiento<input type="date" data-k="seguimiento" value="${esc(a.seguimiento || '')}" class="${tarde ? 'late' : ''}"></label>
       <label class="fld-col">Importe (opcional)<input type="number" min="0" step="0.01" data-k="importe" value="${esc(a.importe ?? '')}" placeholder="€"></label>
       <label class="ag-chk"><input type="checkbox" data-k="compartirImporte" ${a.compartirImporte ? 'checked' : ''}> Compartir importe</label>
     </div></article>`;
 }
 async function agClick(e) {
-  const b = e.target.closest('[data-st]'); if (!b) return;
-  quote = await db.get('quotes', b.closest('[data-id]').dataset.id);
-  quote.status = quote.status === b.dataset.st ? 'catalogo_generado' : b.dataset.st;
-  await persist();
-  if (quote.status === 'aceptado') mixa.say('¡Aceptado! Eso sí que es un buen palé.');
-  showAgenda();
+  const b = e.target.closest('[data-st], [data-act]'); if (!b) return;
+  const id = b.closest('[data-id]')?.dataset.id; if (!id) return;
+  quote = await db.get('quotes', id); tareas(quote);
+  if (b.dataset.st) {
+    quote.status = quote.status === b.dataset.st ? 'catalogo_generado' : b.dataset.st;
+    if (quote.status === 'enviado' && !pendiente(quote)) programar(quote, 'llamada', 3);   // 1ª llamada a los 3 días laborables
+    if (quote.status === 'aceptado') mixa.say('¡Aceptado! Eso sí que es un buen palé.');
+  } else if (b.dataset.act === 'hecha') {
+    const t = quote.agenda.tareas.find(x => x.id === (b.closest('[data-t]')?.dataset.t)) || pendiente(quote);
+    if (!t) return;
+    t.hecha = true; t.hechaEl = hoy();
+    if (!cerrado(quote)) {
+      programar(quote, t.tipo, quote.agenda.intervalo || 3);
+      const sig = pendiente(quote);
+      mixa.say(`Hecha. Te dejo la ${nombreTarea(quote, sig)} para el ${fmt(sig.fecha)}.`);
+    }
+  } else if (b.dataset.act === 'nueva') programar(quote, 'llamada', 1);
+  else return;
+  syncSeg(quote); await persist(); showAgenda();
 }
 async function agChange(e) {
   const k = e.target.dataset.k; if (!k) return;
-  quote = await db.get('quotes', e.target.closest('[data-id]').dataset.id);
+  quote = await db.get('quotes', e.target.closest('[data-id]').dataset.id); tareas(quote);
   const v = e.target.type === 'checkbox' ? e.target.checked : e.target.value.trim();
-  quote.agenda = { ...(quote.agenda || {}), [k]: k === 'importe' ? (v === '' ? null : +v) : v };
-  await persist();
-  if (k === 'seguimiento' || k.startsWith('compartir')) showAgenda();
+  const t = pendiente(quote);
+  if (k === 'tipo' && t) t.tipo = v;
+  else if (k === 'fecha' && t && v) t.fecha = v;
+  else if (k === 'intervalo') quote.agenda.intervalo = +v;
+  else quote.agenda[k] = k === 'importe' ? (v === '' ? null : +v) : v;
+  syncSeg(quote); await persist();
+  if (['tipo', 'fecha'].includes(k) || k.startsWith('compartir')) showAgenda();
 }
 
 // ── Mis presupuestos ──────────────────────────────────────────────────────

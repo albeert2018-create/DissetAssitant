@@ -27,6 +27,8 @@ export function payload(q, cat) {
     quote_date: isoDate(q.date),
     status: q.status || 'en_preparacion',
     follow_up: a.seguimiento || null,
+    next_action: a.siguiente || null,
+    actions_done: a.hechas || 0,
     share_client: !!(a.compartirCliente && a.cliente),
     client_label: a.compartirCliente && a.cliente ? cut(a.cliente, 80) : null,
     share_amount: !!(a.compartirImporte && a.importe != null && a.importe !== ''),
