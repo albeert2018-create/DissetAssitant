@@ -23,7 +23,7 @@ export class Catalog {
     this.sortedRefs = [...this.byRef.keys()].sort();
   }
 
-  static async load(url = 'data/catalogo.app.json') {
+  static async load(url = 'catalogo.app.json') {
     const res = await fetch(url);
     if (!res.ok) throw new Error('No se pudo cargar el catálogo');
     return new Catalog(await res.json());

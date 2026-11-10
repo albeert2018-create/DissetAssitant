@@ -2,13 +2,13 @@
 // Al publicar una versión nueva solo cambia VERSION: los presupuestos y el aprendizaje (IndexedDB) no se tocan.
 const VERSION = 'v0.4.1';
 const SHELL = `shell-${VERSION}`, IMG = 'img-disset';
-const FILES = ['./', 'index.html', 'css/app.css', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png',
-  'js/app.js', 'js/db.js', 'js/util.js', 'js/catalog.js', 'js/matcher.js', 'js/reader.js', 'js/ocr.js', 'js/layout.js', 'js/mascot.js', 'js/crosssell.js',
-  'data/catalogo.app.json', 'vendor/pdfjs/pdf.min.js', 'vendor/pdfjs/pdf.worker.min.js',
-  'vendor/tesseract/tesseract.min.js', 'vendor/tesseract/worker.min.js',
-  'vendor/tesseract/core/tesseract-core-simd-lstm.wasm.js', 'vendor/tesseract/core/tesseract-core-lstm.wasm.js',
-  'vendor/tesseract/lang/spa-traineddata-gz.wasm',
-  'fonts/inter-latin-400-normal.woff2', 'fonts/inter-latin-500-normal.woff2', 'fonts/inter-latin-600-normal.woff2', 'fonts/inter-latin-700-normal.woff2'];
+const FILES = ['./', 'index.html', 'app.css', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png',
+  'app.js', 'db.js', 'util.js', 'catalog.js', 'matcher.js', 'reader.js', 'ocr.js', 'layout.js', 'mascot.js', 'crosssell.js',
+  'catalogo.app.json', 'pdf.min.js', 'pdf.worker.min.js',
+  'tesseract.min.js', 'worker.min.js',
+  'tesseract-core-simd-lstm.wasm.js', 'tesseract-core-lstm.wasm.js',
+  'spa-traineddata-gz.wasm',
+  'inter-latin-400-normal.woff2', 'inter-latin-500-normal.woff2', 'inter-latin-600-normal.woff2', 'inter-latin-700-normal.woff2'];
 
 self.addEventListener('install', e => e.waitUntil(caches.open(SHELL).then(c => c.addAll(FILES)).then(() => self.skipWaiting())));
 self.addEventListener('activate', e => e.waitUntil(

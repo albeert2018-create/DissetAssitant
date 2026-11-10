@@ -19,7 +19,7 @@ function idbKeyval(mode, fn) {
 async function modeloEnCache(base) {
   const KEY = './spa.traineddata';
   if (await idbKeyval('readonly', s => s.get(KEY))) return;
-  const r = await fetch(base + 'lang/spa-traineddata-gz.wasm');
+  const r = await fetch(base + 'spa-traineddata-gz.wasm');
   if (!r.ok) throw new Error('No se pudo cargar el modelo de OCR');
   const data = new Uint8Array(await r.arrayBuffer());
   await idbKeyval('readwrite', s => s.put(data, KEY));
@@ -28,11 +28,11 @@ async function modeloEnCache(base) {
 export function ocrWorker(onProgress) {
   if (!workerP) {
     const T = window.Tesseract;
-    const base = new URL('vendor/tesseract/', location.href).href;
+    const base = new URL('./', location.href).href;
     workerP = modeloEnCache(base).then(() => T.createWorker('spa', 1, {
       workerPath: base + 'worker.min.js',
-      corePath: base + 'core/',
-      langPath: base + 'lang/',
+      corePath: base,
+      langPath: base,
       gzip: true,
       workerBlobURL: false,
       logger: m => onProgress && m.status === 'recognizing text' && onProgress(m.progress),

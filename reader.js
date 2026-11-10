@@ -40,7 +40,7 @@ const upperHeading = t => {
 // ── Extracción con posiciones ────────────────────────────────────────────
 async function pdfRows(file, onStatus) {
   const pdfjs = window.pdfjsLib;
-  pdfjs.GlobalWorkerOptions.workerSrc = 'vendor/pdfjs/pdf.worker.min.js';
+  pdfjs.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
   const doc = await pdfjs.getDocument({ data: await file.arrayBuffer(), isEvalSupported: false }).promise;
   const pages = [];
   for (let n = 1; n <= doc.numPages; n++) {
