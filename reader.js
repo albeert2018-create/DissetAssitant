@@ -111,15 +111,23 @@ function rowFromText(t, page, i) {
 }
 
 // Cabeceras y pies repetidos en varias páginas
-function dropRepeated(pages) {
+// Solo se quita lo que se repite en la franja de cabecera o pie de varias páginas, y nunca una fila con un
+// código del catálogo: dos líneas iguales del mismo producto en páginas distintas NO son una cabecera.
+function dropRepeated(pages, cat) {
   if (pages.length < 2) return { rows: pages.flat(), removed: 0 };
+  const zona = new Map();
+  for (const rows of pages) {
+    const ys = rows.map(r => r.y), top = Math.max(...ys), bot = Math.min(...ys), span = (top - bot) || 1;
+    rows.forEach(r => { const rel = (top - r.y) / span; zona.set(r, rel < 0.3 || rel > 0.88); });
+  }
+  const conRef = r => r.text.split(/\s+/).some(t => { const n = normRef(t); return n.length >= 4 && cat.byRef.has(n); });
   const count = new Map();
   pages.forEach(rows => new Set(rows.map(r => r.text.replace(/\d+/g, '#'))).forEach(k => count.set(k, (count.get(k) || 0) + 1)));
-  const rep = new Set([...count].filter(([k, n]) => n >= Math.min(2, pages.length) && k.length > 2).map(([k]) => k));
+  const rep = new Set([...count].filter(([k, n]) => n >= 2 && k.length > 2).map(([k]) => k));
   let removed = 0;
   const rows = pages.flat().filter(r => {
     const k = r.text.replace(/\d+/g, '#');
-    if (rep.has(k) && !OPTION.test(r.text)) { removed++; return false; }
+    if (rep.has(k) && zona.get(r) && !OPTION.test(r.text) && !conRef(r)) { removed++; return false; }
     if (/^p[aá]g(ina)?\.?\s*#/i.test(k) || /^#\s*(\/|de)\s*#$/.test(k)) { removed++; return false; }
     return true;
   });
@@ -251,7 +259,7 @@ export async function readQuote(file, cat, onStatus) {
     pages = [lines.map((t, i) => rowFromText(t, 1, i))];
   }
   const m = meta(pages.flat());
-  const { rows, removed } = dropRepeated(pages);
+  const { rows, removed } = dropRepeated(pages, cat);
   const byLines = parse(rows, cat, null);
   const cols = detectColumns(rows);
   const byCols = cols ? parse(rows, cat, cols) : null;
