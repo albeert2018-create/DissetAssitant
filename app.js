@@ -6,6 +6,8 @@ import { readQuote } from './reader.js';
 import { renderCatalog } from './layout.js';
 import { Mascot } from './mascot.js';
 import { CrossSell } from './crosssell.js';
+import * as auth from './auth.js';
+import { queue, flush, fetchRules } from './sync.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const view = $('#view');
@@ -14,6 +16,10 @@ const ST = {
   seguro: ['Seguro', 'pill-ok'], revisar: ['Por confirmar', 'pill-warn'], sin_ficha: ['Sin ficha', 'pill-none'],
 };
 let cat, matcher, mixa, perfil, quote = null, openFix = null;
+let me = null, remote = false;   // usuario conectado (perfil del servidor) y si hay servidor configurado
+const QST = { en_preparacion: 'En preparación', catalogo_generado: 'Catálogo generado', enviado: 'Enviado',
+  negociando: 'Negociándose', aceptado: 'Aceptado', perdido: 'Perdido' };
+const AGENDA_ST = ['enviado', 'negociando', 'aceptado', 'perdido'];
 
 const FRASES = {
   home: ['Suéltame el presupuesto. Yo me encargo, sin precios.', 'Aquí los precios no entran. Ni con casco.',
@@ -23,6 +29,8 @@ const FRASES = {
   pdf: ['Ni precio, ni IVA, ni NIF. Limpio como obra recién entregada.', 'Dale a «Guardar como PDF» y listo para enviar.'],
   venta: ['Si no encaja, ×. Yo tomo nota y no te lo vuelvo a sacar.', 'Prefiero un hueco vacío a inventarme una compatibilidad.',
     'Un roll sin rampa es medio pedido.', 'Las dos de dirección van en la 1 y la 3. Las otras, por puntos.', 'El % es lo que encaja, no lo que se va a vender.'],
+  agenda: ['Lo que no se sigue, no se cierra.', 'Pon fecha al próximo seguimiento y yo te lo recuerdo aquí.',
+    'El nombre del cliente se queda en tu ordenador salvo que marques compartir.'],
   hist: ['Aquí guardo tus últimos 60 presupuestos. Solo en este ordenador.', 'Haz una copia de vez en cuando. Yo tengo siete vidas; tus datos, una.'],
 };
 
@@ -38,10 +46,133 @@ async function init() {
     view.innerHTML = `<div class="panel err">No se pudo cargar el catálogo. ${esc(e.message)}</div>`;
     return;
   }
+  const a = await auth.initAuth();
+  remote = a.mode === 'remote';
+  if (remote) {
+    await gate(a);
+    const rules = navigator.onLine ? await fetchRules() : null;   // potenciales publicados por dirección
+    if (rules?.payload?.potenciales?.length) { cat.potenciales = rules.payload.potenciales; await db.meta('potenciales', rules); }
+    else { const cached = await db.meta('potenciales'); if (cached?.payload?.potenciales?.length) cat.potenciales = cached.payload.potenciales; }
+    if (!(await db.meta('perfil')) && me) perfil = { ...perfil, nombre: me.full_name || perfil.nombre, email: me.email || perfil.email, telefono: me.phone || perfil.telefono };
+    addEventListener('online', () => syncNow());
+    setInterval(syncNow, 60000);
+    syncNow();
+  }
+  userChip();
   window.addEventListener('hashchange', route);
   document.addEventListener('paste', onPaste);
   $('#btn-ajustes').addEventListener('click', openSettings);
   route();
+}
+
+// ── Acceso: contraseña (mín. 12) y 2FA para admin y CEO ──────────────────
+async function gate(a) {
+  document.body.classList.add('gated');
+  let aviso = a.linkError || '';
+  let linkType = a.linkType;
+  for (;;) {
+    const u = await auth.currentUser();
+    if (!u) { await screenLogin(aviso); aviso = ''; continue; }
+    if (linkType === 'invite' || linkType === 'recovery') { await screenPassword(linkType); linkType = null; }
+    try { me = await auth.profile(); await db.meta('me', me); }
+    catch { if (!navigator.onLine) me = await db.meta('me'); else throw new Error('No se pudo leer tu usuario.'); }
+    if (!me || !me.active) { await auth.signOut(); aviso = 'Tu usuario no está activo. Habla con administración.'; continue; }
+    if (auth.isAdmin(me) && navigator.onLine) {
+      const st = await auth.mfaState();
+      if (st.level !== 'aal2') { if (st.factorId) await screenMfa(st.factorId); else await screenEnroll(); continue; }
+    }
+    break;
+  }
+  document.body.classList.remove('gated');
+}
+
+function authCard(inner) {
+  view.innerHTML = `<section class="auth card"><p class="kicker">Disset Odiseo · Asistente comercial</p>${inner}</section>`;
+  return view.querySelector('form');
+}
+function formError(f, msg) { const e = f.querySelector('.auth-err'); e.textContent = msg; e.hidden = !msg; }
+const busy = (f, on) => f.querySelectorAll('button, input').forEach(x => x.disabled = on);
+
+function screenLogin(aviso) {
+  return new Promise(done => {
+    const f = authCard(`<h1>Entrar</h1><p class="muted">Usa el correo con el que te han invitado.</p>
+      <form class="auth-form"><label class="fld-col">Correo<input name="email" type="email" autocomplete="username" required></label>
+      <label class="fld-col">Contraseña<input name="pass" type="password" autocomplete="current-password" required></label>
+      <p class="auth-err" role="alert" ${aviso ? '' : 'hidden'}>${esc(aviso)}</p>
+      <div class="row-end"><button type="button" class="lnk" id="olvido">He olvidado la contraseña</button><button class="btn">Entrar</button></div></form>`);
+    f.onsubmit = async e => {
+      e.preventDefault(); busy(f, true); formError(f, '');
+      try { await auth.signIn(f.email.value, f.pass.value); done(); }
+      catch (err) { formError(f, err.message); busy(f, false); }
+    };
+    $('#olvido').onclick = async () => {
+      if (!f.email.value) return formError(f, 'Escribe tu correo y vuelve a pulsar.');
+      try { await auth.resetPassword(f.email.value); formError(f, 'Te hemos enviado un correo para crear una contraseña nueva.'); }
+      catch (err) { formError(f, err.message); }
+    };
+  });
+}
+function screenPassword(tipo) {
+  return new Promise(done => {
+    const f = authCard(`<h1>${tipo === 'invite' ? 'Bienvenido. Crea tu contraseña' : 'Nueva contraseña'}</h1>
+      <p class="muted">Mínimo ${auth.MIN_PASSWORD} caracteres, con letras y números. No la compartas con nadie.</p>
+      <form class="auth-form"><label class="fld-col">Contraseña<input name="p1" type="password" autocomplete="new-password" minlength="${auth.MIN_PASSWORD}" required></label>
+      <label class="fld-col">Repítela<input name="p2" type="password" autocomplete="new-password" required></label>
+      <p class="auth-err" role="alert" hidden></p><div class="row-end"><button class="btn">Guardar contraseña</button></div></form>`);
+    f.onsubmit = async e => {
+      e.preventDefault();
+      const bad = auth.passwordProblem(f.p1.value, f.p2.value);
+      if (bad) return formError(f, bad);
+      busy(f, true);
+      try { await auth.setPassword(f.p1.value); done(); } catch (err) { formError(f, err.message); busy(f, false); }
+    };
+  });
+}
+async function screenEnroll() {
+  const en = await auth.mfaEnroll();
+  return new Promise(done => {
+    const f = authCard(`<h1>Activa la verificación en dos pasos</h1>
+      <p class="muted">Como administrador o dirección puedes ver y cambiar datos de todo el equipo, así que tu cuenta lleva un segundo paso.
+      Escanea el código con Google Authenticator, Microsoft Authenticator o similar y escribe los 6 números.</p>
+      <div class="mfa-qr"><img src="${esc(en.qr)}" alt="Código QR para la app de verificación" width="180" height="180"></div>
+      <p class="muted small">¿No puedes escanear? Clave: <code class="mono">${esc(en.secret)}</code></p>
+      <form class="auth-form"><label class="fld-col">Código de 6 cifras<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" required></label>
+      <p class="auth-err" role="alert" hidden></p><div class="row-end"><button class="btn">Activar</button></div></form>`);
+    f.onsubmit = async e => {
+      e.preventDefault(); busy(f, true);
+      try { await auth.mfaVerify(en.factorId, f.code.value); done(); } catch (err) { formError(f, err.message); busy(f, false); }
+    };
+  });
+}
+function screenMfa(factorId) {
+  return new Promise(done => {
+    const f = authCard(`<h1>Verificación en dos pasos</h1><p class="muted">Abre tu app de verificación y escribe el código de Disset Odiseo.</p>
+      <form class="auth-form"><label class="fld-col">Código de 6 cifras<input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
+      <p class="auth-err" role="alert" hidden></p><div class="row-end"><button type="button" class="lnk" id="salir">Salir</button><button class="btn">Verificar</button></div></form>`);
+    f.onsubmit = async e => {
+      e.preventDefault(); busy(f, true);
+      try { await auth.mfaVerify(factorId, f.code.value); done(); } catch (err) { formError(f, err.message); busy(f, false); }
+    };
+    $('#salir').onclick = async () => { await auth.signOut(); done(); };
+  });
+}
+
+// ── Usuario y sincronización en la cabecera ───────────────────────────────
+function userChip() {
+  const box = $('#user');
+  if (!remote) { box.innerHTML = `<span class="sync" title="Sin servidor configurado: todo se guarda solo aquí">Solo en este ordenador</span>`; return; }
+  box.innerHTML = `<span class="sync" id="sync">…</span><span class="who">${esc(me?.full_name || '')}${auth.isAdmin(me) ? ' · <span class="accent">admin</span>' : ''}</span><button class="lnk" id="logout" type="button">Salir</button>`;
+  $('#logout').onclick = async () => { await auth.signOut(); location.hash = '#/'; location.reload(); };
+}
+let syncT = null;
+function syncSoon() { if (!remote) return; clearTimeout(syncT); syncT = setTimeout(syncNow, 1500); }
+async function syncNow() {
+  if (!remote || !me) return;
+  const r = await flush(cat, me);
+  const el = $('#sync'); if (!el) return;
+  el.classList.toggle('pend', r.pending > 0);
+  el.textContent = r.pending ? `${navigator.onLine ? '' : 'Sin conexión · '}${r.pending} pendiente${r.pending > 1 ? 's' : ''}` : 'Sincronizado ✓';
+  el.title = r.error ? 'Se reintentará: ' + r.error : 'Al servidor solo van código, ficha, cantidad y estado. Nunca precios ni datos del cliente.';
 }
 
 function route() {
@@ -51,6 +182,7 @@ function route() {
   if ((m = h.match(/^#\/q\/([\w-]+)\/venta/))) return showCross(m[1]);
   if ((m = h.match(/^#\/q\/([\w-]+)/))) return showLines(m[1]);
   if (h.startsWith('#/historial')) return showHistory();
+  if (h.startsWith('#/agenda')) return showAgenda();
   return showHome();
 }
 function nav(active) {
@@ -115,6 +247,7 @@ async function handleFiles(files) {
     }
     if (!q.lines.length) { say('No he encontrado líneas de producto. ¿Es un presupuesto? Prueba con el PDF original o una captura más nítida.'); mixa.say('Ahí no veo ni una referencia. ¿Seguro que es un presupuesto?'); return; }
     await saveQuote(q);
+    if (remote) { await queue.quote(q.id); syncSoon(); }
     quote = q; openFix = null; xs = null;
     location.hash = `#/q/${q.id}`;
     if (location.hash === `#/q/${q.id}`) route();
@@ -128,7 +261,7 @@ async function load(id) {
   if (quote?.id !== id) quote = await db.get('quotes', id);
   return quote;
 }
-const persist = () => saveQuote(quote);
+const persist = async () => { await saveQuote(quote); if (remote) { await queue.quote(quote.id); syncSoon(); } };
 const touchLines = () => { xs = null; };
 
 async function showLines(id) {
@@ -198,7 +331,7 @@ async function onLineClick(e) {
   if (act === 'pick') {
     const pi = +b.dataset.pi, vi = b.dataset.vi === '' ? null : +b.dataset.vi;
     const v = vi != null ? cat.variants[vi] : null;
-    if (l.ref && v) await matcher.learn(l.ref, v);
+    if (l.ref && v) { await matcher.learn(l.ref, v); if (remote) await queue.learn('correccion', normRef(l.ref), { ref: v.ref, ficha: cat.product(v.pi).id }); }
     l.match = { pi, vi, confidence: 1, why: 'Corregido por el comercial', status: STATUS.OK };
     if (!l.ref && v) l.ref = v.ref;
     openFix = null; touchLines(); await persist(); mixa.say('Apuntado. La próxima vez esa la clavo yo solita.');
@@ -216,9 +349,10 @@ async function aprender(eng, c, campo) {
   const r = (await db.get('learning', key)) || { key, situacion: eng.ctx.main, producto: p.id, nombre: p.name, added: 0, discarded: 0 };
   r[campo] = (r[campo] || 0) + 1; r.at = new Date().toISOString();
   await db.put('learning', r); eng.L.set(key, r);
+  if (remote) await queue.learn(campo === 'added' ? 'anadido' : 'descartado', key, { familia: c.fa, situacion: eng.ctx.main });
 }
 function evento(c, accion) {
-  (quote.reco.eventos ||= []).push({ producto: cat.product(c.pi).id, familia: c.fa, slot: c.slot, tipo: c.badge, score: c.score, accion, at: new Date().toISOString() });
+  (quote.reco.eventos ||= []).push({ id: uuid(), producto: cat.product(c.pi).id, familia: c.fa, slot: c.slot, tipo: c.badge, score: c.score, accion, at: new Date().toISOString() });
 }
 
 async function showCross(id) {
@@ -314,6 +448,7 @@ async function showCatalog(id) {
   document.title = `Catálogo ${quote.offer || ''} · Disset Odiseo`;
   view.innerHTML = `<div class="bar noprint"><div><p class="kicker">Paso 4 · Catálogo</p><h1>Catálogo para el cliente</h1><p class="muted" id="pinfo">Maquetando…</p></div>
     <div class="bar-actions"><a class="btn ghost" href="#/q/${quote.id}">Líneas</a><a class="btn ghost" href="#/q/${quote.id}/venta">Venta cruzada</a><button class="btn" id="print">Guardar como PDF</button></div></div>
+    <div id="sent" class="noprint sent"></div>
     <div id="pages" class="pages"></div>`;
   const n = await renderCatalog($('#pages'), quote, cat, footerText());
   $('#pinfo').textContent = `${n} página${n > 1 ? 's' : ''} A4 · sin precios ni datos del cliente`;
@@ -322,7 +457,70 @@ async function showCatalog(id) {
     quote.catalogs = (quote.catalogs || 0) + 1; await persist();
     const t = document.title; document.title = `Catalogo_${(quote.offer || 'Disset').replace(/[^\w-]+/g, '_')}`;
     window.print(); document.title = t;
+    showSentPrompt();
   });
+  showSentPrompt();
+}
+function showSentPrompt() {
+  const box = $('#sent'); if (!box) return;
+  const done = AGENDA_ST.includes(quote.status);
+  box.innerHTML = done ? `<span class="muted small">Estado: <b>${QST[quote.status]}</b> · <a href="#/agenda">Ver agenda</a></span>`
+    : quote.catalogs ? `<button class="btn ghost" id="mark-sent">Marcar como enviado al cliente</button>` : '';
+  const b = $('#mark-sent');
+  if (b) b.onclick = async () => { quote.status = 'enviado'; quote.agenda = { ...(quote.agenda || {}), enviadoEl: new Date().toISOString().slice(0, 10) }; await persist(); mixa.say('Enviado. Te lo dejo en la agenda para el seguimiento.'); showSentPrompt(); };
+}
+
+// ── Agenda comercial ──────────────────────────────────────────────────────
+let agendaFiltro = 'activos';
+const hoy = () => new Date().toISOString().slice(0, 10);
+async function showAgenda() {
+  nav('agenda'); mixa.setPhrases(FRASES.agenda); document.title = 'Mi agenda · Disset Odiseo';
+  const qs = (await db.all('quotes')).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const grupo = q => AGENDA_ST.includes(q.status) ? q.status : 'por_enviar';
+  const n = k => qs.filter(q => k === 'activos' ? !['aceptado', 'perdido'].includes(q.status) : grupo(q) === k).length;
+  const avisos = qs.filter(q => q.agenda?.seguimiento && q.agenda.seguimiento <= hoy() && !['aceptado', 'perdido'].includes(q.status));
+  const lista = qs.filter(q => agendaFiltro === 'activos' ? !['aceptado', 'perdido'].includes(q.status) : grupo(q) === agendaFiltro);
+  const FIL = [['activos', 'Abiertos'], ['por_enviar', 'Por enviar'], ['enviado', 'Enviados'], ['negociando', 'Negociándose'], ['aceptado', 'Aceptados'], ['perdido', 'Perdidos']];
+  view.innerHTML = `<div class="bar"><div><p class="kicker">Seguimiento comercial</p><h1>Mi agenda</h1>
+    <p class="muted">${n('enviado')} enviados · ${n('negociando')} negociándose · ${n('aceptado')} aceptados · ${n('perdido')} perdidos</p></div>
+    <div class="bar-actions">${remote ? '<span class="muted small">Dirección ve estado y fechas; el cliente y el importe solo si marcas «compartir».</span>' : '<span class="muted small">Se guarda en este ordenador.</span>'}</div></div>
+    ${avisos.length ? `<div class="card ag-alert"><b>${avisos.length} seguimiento${avisos.length > 1 ? 's' : ''} para hoy o atrasado${avisos.length > 1 ? 's' : ''}:</b> ${avisos.map(q => `<a href="#ag-${q.id}">${esc(q.offer || 'sin número')}${q.agenda?.cliente ? ' · ' + esc(q.agenda.cliente) : ''}</a>`).join(' · ')}</div>` : ''}
+    <div class="chips" role="tablist">${FIL.map(([k, t]) => `<button role="tab" class="chip${agendaFiltro === k ? ' on' : ''}" aria-selected="${agendaFiltro === k}" data-f="${k}">${t} <span>${n(k)}</span></button>`).join('')}</div>
+    <div class="ag-list">${lista.length ? lista.map(agRow).join('') : '<div class="card"><p class="muted">Nada por aquí.</p></div>'}</div>`;
+  view.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { agendaFiltro = b.dataset.f; showAgenda(); });
+  view.querySelector('.ag-list').addEventListener('click', agClick);
+  view.querySelector('.ag-list').addEventListener('change', agChange);
+}
+function agRow(q) {
+  const a = q.agenda || {}, tarde = a.seguimiento && a.seguimiento <= hoy() && !['aceptado', 'perdido'].includes(q.status);
+  return `<article class="card ag-row" id="ag-${q.id}" data-id="${q.id}">
+    <div class="ag-head"><a class="ag-title" href="#/q/${q.id}">Oferta ${esc(q.offer || 'sin número')}</a>
+      <span class="muted small">${esc(q.date || '')} · ${q.lines.filter(l => l.include !== false).length} líneas${q.extras?.length ? ` · ${q.extras.length} de venta cruzada` : ''}</span>
+      <span class="pill ${['aceptado'].includes(q.status) ? 'pill-ok' : q.status === 'perdido' ? 'pill-none' : 'pill-warn'}">${QST[q.status] || q.status}</span></div>
+    <div class="ag-st" role="group" aria-label="Estado">${AGENDA_ST.map(s => `<button class="seg${q.status === s ? ' on' : ''}" data-st="${s}" aria-pressed="${q.status === s}">${QST[s]}</button>`).join('')}</div>
+    <div class="ag-fields">
+      <label class="fld-col">Cliente<input data-k="cliente" value="${esc(a.cliente || '')}" maxlength="80" placeholder="Solo en este ordenador"></label>
+      <label class="ag-chk"><input type="checkbox" data-k="compartirCliente" ${a.compartirCliente ? 'checked' : ''}> Compartir con dirección</label>
+      <label class="fld-col">Próximo seguimiento<input type="date" data-k="seguimiento" value="${esc(a.seguimiento || '')}" class="${tarde ? 'late' : ''}"></label>
+      <label class="fld-col">Importe (opcional)<input type="number" min="0" step="0.01" data-k="importe" value="${esc(a.importe ?? '')}" placeholder="€"></label>
+      <label class="ag-chk"><input type="checkbox" data-k="compartirImporte" ${a.compartirImporte ? 'checked' : ''}> Compartir importe</label>
+    </div></article>`;
+}
+async function agClick(e) {
+  const b = e.target.closest('[data-st]'); if (!b) return;
+  quote = await db.get('quotes', b.closest('[data-id]').dataset.id);
+  quote.status = quote.status === b.dataset.st ? 'catalogo_generado' : b.dataset.st;
+  await persist();
+  if (quote.status === 'aceptado') mixa.say('¡Aceptado! Eso sí que es un buen palé.');
+  showAgenda();
+}
+async function agChange(e) {
+  const k = e.target.dataset.k; if (!k) return;
+  quote = await db.get('quotes', e.target.closest('[data-id]').dataset.id);
+  const v = e.target.type === 'checkbox' ? e.target.checked : e.target.value.trim();
+  quote.agenda = { ...(quote.agenda || {}), [k]: k === 'importe' ? (v === '' ? null : +v) : v };
+  await persist();
+  if (k === 'seguimiento' || k.startsWith('compartir')) showAgenda();
 }
 
 // ── Mis presupuestos ──────────────────────────────────────────────────────
@@ -347,7 +545,7 @@ async function showHistory() {
     catch (err) { alert('No es una copia válida: ' + err.message); }
   };
   $('#reset').onclick = async () => { if (confirm('¿Borrar todos los presupuestos guardados en este ordenador? Las correcciones aprendidas se mantienen.')) { await db.clear('quotes'); quote = null; showHistory(); } };
-  view.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => { if (confirm('¿Borrar este presupuesto?')) { await db.del('quotes', b.dataset.del); showHistory(); } });
+  view.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => { if (confirm('¿Borrar este presupuesto?')) { await db.del('quotes', b.dataset.del); if (remote) { await queue.remove(b.dataset.del); syncSoon(); } showHistory(); } });
 }
 
 // ── Ajustes: datos del pie del catálogo ───────────────────────────────────
