@@ -190,7 +190,7 @@ function route() {
   }
   if (h.startsWith('#/equipo')) return showEquipo();
   if ((m = h.match(/^#\/q\/([\w-]+)\/catalogo/))) return showCatalog(m[1]);
-  if ((m = h.match(/^#\/q\/([\w-]+)\/venta/))) return showCross(m[1]);
+  if ((m = h.match(/^#\/q\/([\w-]+)\/venta/))) { scrollVenta = true; location.replace(`#/q/${m[1]}`); return; }
   if ((m = h.match(/^#\/q\/([\w-]+)/))) return showLines(m[1]);
   if (h.startsWith('#/historial')) return showHistory();
   if (h.startsWith('#/agenda')) return showAgenda();
@@ -310,15 +310,17 @@ async function showLines(id) {
     <div class="bar-actions">
       <label class="fld">Oferta <input id="offer" value="${esc(quote.offer)}" size="12"></label>
       <label class="fld">Fecha <input id="date" value="${esc(quote.date)}" size="10"></label>
-      <a class="btn ghost" href="#/q/${quote.id}/catalogo">Ver catálogo</a>
-      <a class="btn" href="#/q/${quote.id}/venta">Venta cruzada${quote.extras?.length ? ` · ${quote.extras.length}` : ''} ›</a></div></div>
+      <a class="btn" href="#/q/${quote.id}/catalogo" id="ver-cat">Ver catálogo${quote.extras?.length ? ` · ${quote.extras.length} de venta cruzada` : ''} ›</a></div></div>
   <div class="card lines" id="lines">${rows}</div>
+  <section class="xs-sec" id="xs-sec" aria-label="Venta cruzada"></section>
   ${notasHTML(quote)}
   <p class="muted small">Leído por ${esc(quote.strategy || '—')} · descartadas en local: ${quote.stats?.descartadas || 0} líneas de precios/condiciones y ${quote.stats?.personales || 0} con datos del cliente.</p>`;
   $('#offer').addEventListener('change', e => { quote.offer = e.target.value.trim(); persist(); });
   $('#date').addEventListener('change', e => { quote.date = e.target.value.trim(); persist(); });
   $('#lines').addEventListener('click', onLineClick);
   bindNotas(view.querySelector('[data-notas]'));
+  await renderCross($('#xs-sec'));
+  if (scrollVenta) { scrollVenta = false; $('#xs-sec')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
   $('#lines').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('.fix-input')) { e.preventDefault(); doSearch(); } });
   if (openFix) { const inp = $('.fix-input'); inp?.focus(); inp?.select(); if (inp?.value) doSearch(); }
 }
@@ -363,8 +365,9 @@ async function onLineClick(e) {
 function conFoto(l) { return l.foto ?? !esAproximado(l); }
 
 // ── Venta cruzada: seis tarjetas ───────────────────────────────────────────
-const BADGE = { 'Potencial': 'b-pot', 'Completa tu pedido': 'b-ok', 'Muy compatible': 'b-ok', 'Compatible': 'b-lav', 'Oportunidad': 'b-warn' };
+const BADGE = { 'Según tus notas': 'b-nota', 'Potencial': 'b-pot', 'Completa tu pedido': 'b-ok', 'Muy compatible': 'b-ok', 'Compatible': 'b-lav', 'Oportunidad': 'b-warn' };
 let xs = null;   // { id, eng }
+let scrollVenta = false;
 
 async function learningMap() { return new Map((await db.all('learning')).map(r => [r.key, r])); }
 async function aprender(eng, c, campo) {
@@ -378,10 +381,10 @@ function evento(c, accion) {
   (quote.reco.eventos ||= []).push({ id: uuid(), producto: cat.product(c.pi).id, familia: c.fa, slot: c.slot, tipo: c.badge, score: c.score, accion, at: new Date().toISOString() });
 }
 
-async function showCross(id) {
-  nav(''); if (!(await load(id))) return (location.hash = '#/');
-  mixa.setPhrases(FRASES.venta); document.title = `Venta cruzada · Oferta ${quote.offer || ''}`;
-  if (xs?.id !== id) xs = { id, eng: new CrossSell(cat, quote, await learningMap()) };
+/** Venta cruzada dentro de la pantalla de líneas, debajo del presupuesto */
+async function renderCross(sec) {
+  if (!sec || !quote) return;
+  if (xs?.id !== quote.id) xs = { id: quote.id, eng: new CrossSell(cat, quote, await learningMap()) };
   const eng = xs.eng;
   quote.reco ||= { cards: [], descartados: [], marcados: {}, eventos: [], aprendidos: [] };
   const R = quote.reco;
@@ -389,28 +392,28 @@ async function showCross(id) {
   const nuevas = cards.filter(c => c && !R.cards.includes(c.key));
   R.cards = cards.map(c => c?.key || null);
   nuevas.forEach(c => evento(c, 'mostrada'));
-  await persist();
-  const n = Object.keys(R.marcados).filter(k => R.cards.includes(k)).length;
-  view.innerHTML = `
-  <div class="bar"><div><p class="kicker">Paso 3 · Venta cruzada</p><h1>Te puede interesar</h1>
-    <p class="muted">Marca las propuestas que van al catálogo. La <b>×</b> descarta y trae la siguiente alternativa.</p></div>
-    <div class="bar-actions"><a class="btn ghost" href="#/q/${quote.id}">Líneas</a>
-      <button class="btn ghost" id="xs-all">Marcar todas</button>
-      <button class="btn" id="xs-ok">${n ? `Confirmar ${n} y ver catálogo` : 'Continuar sin propuestas'} ›</button></div></div>
-  <div class="xs-grid" id="xs">${cards.map((c, i) => c ? cardHTML(eng, c, i) : emptyCard(i)).join('')}</div>
-  <p class="muted small">1 y 3: productos que potencia dirección · 2, 4, 5 y 6: por compatibilidad comercial. El % mide cuánto encaja con el pedido, no la probabilidad de venta.</p>`;
-  const grid = $('#xs');
-  grid.addEventListener('click', e => onCross(e, eng));
-  grid.addEventListener('change', e => {
+  if (nuevas.length) await persist();
+  const n = cards.filter(c => c && c.key in R.marcados).length;
+  sec.innerHTML = `<div class="xs-head"><div><p class="kicker">Venta cruzada</p><h2>Te puede interesar</h2>
+      <p class="muted small">Pulsa «Añadir al catálogo» en las que quieras incluir. La <b>×</b> descarta y trae la siguiente.</p></div>
+      <div class="xs-head-act"><span class="muted small">${n ? `${n} en el catálogo` : 'Ninguna añadida'}</span><button class="btn ghost" id="xs-all" type="button">Añadir todas</button></div></div>
+    <div class="xs-grid" id="xs">${cards.map((c, i) => c ? cardHTML(eng, c, i) : emptyCard(i)).join('')}</div>
+    <p class="muted small">1 y 3: productos que potencia dirección · 2, 4, 5 y 6: por compatibilidad comercial. El % mide cuánto encaja con el pedido, no la probabilidad de venta.</p>`;
+  const grid = sec.querySelector('#xs');
+  grid.addEventListener('click', e => onCross(e, eng, sec, cards));
+  grid.addEventListener('change', async e => {
     const sel = e.target.closest('select'); if (!sel) return;
     const k = sel.closest('[data-key]').dataset.key;
     R.sel = { ...(R.sel || {}), [k]: +sel.value };
-    if (k in R.marcados) R.marcados[k] = +sel.value;
-    persist();
+    if (k in R.marcados) { R.marcados[k] = +sel.value; await aplicarExtras(eng, cards); }
+    await persist();
   });
-  $('#xs-all').onclick = () => { cards.forEach(c => { if (c && !(c.key in R.marcados)) R.marcados[c.key] = R.sel?.[c.key] ?? eng.referencias(c).pre?.idx ?? null; }); persist().then(() => showCross(id)); };
-  $('#xs-ok').onclick = () => confirmCross(eng, cards);
+  sec.querySelector('#xs-all').onclick = async () => {
+    cards.forEach(c => { if (c && !(c.key in R.marcados)) { R.marcados[c.key] = R.sel?.[c.key] ?? eng.referencias(c).pre?.idx ?? null; evento(c, 'marcada'); } });
+    await aplicarExtras(eng, cards); await persist(); renderCross(sec); verCatBtn();
+  };
 }
+function verCatBtn() { const b = $('#ver-cat'); if (b) b.textContent = `Ver catálogo${quote.extras?.length ? ` · ${quote.extras.length} de venta cruzada` : ''} ›`; }
 
 function cardHTML(eng, c, i) {
   const p = cat.product(c.pi), R = quote.reco;
@@ -434,23 +437,23 @@ function cardHTML(eng, c, i) {
 }
 const emptyCard = i => `<article class="xs-card xs-empty"><span class="xs-n">${i + 1}</span><p>Sin más propuestas con justificación suficiente.</p><p class="muted small">Mejor un hueco que una compatibilidad inventada.</p></article>`;
 
-async function onCross(e, eng) {
+async function onCross(e, eng, sec, cards) {
   const b = e.target.closest('[data-act]'); if (!b) return;
   const k = b.closest('[data-key]').dataset.key, c = eng.byKey.get(k), R = quote.reco;
   if (b.dataset.act === 'add') {
     if (k in R.marcados) { delete R.marcados[k]; evento(c, 'desmarcada'); }
-    else { R.marcados[k] = +(b.closest('.xs-card').querySelector('select')?.value ?? NaN); if (Number.isNaN(R.marcados[k])) R.marcados[k] = null; evento(c, 'marcada'); }
-    await persist(); return showCross(quote.id);
-  }
-  if (b.dataset.act === 'x') {
+    else { R.marcados[k] = +(b.closest('.xs-card').querySelector('select')?.value ?? NaN); if (Number.isNaN(R.marcados[k])) R.marcados[k] = null; evento(c, 'marcada'); mixa.say('Añadida. Saldrá en «Te puede interesar» del catálogo.'); }
+  } else if (b.dataset.act === 'x') {
     R.descartados.push(k); delete R.marcados[k]; evento(c, 'descartada');
     await aprender(eng, c, 'discarded');
     mixa.say('Fuera. Apuntado: la próxima vez la tengo en cuenta.');
-    await persist(); return showCross(quote.id);
-  }
+  } else return;
+  await aplicarExtras(eng, cards); await persist();
+  await renderCross(sec); verCatBtn();
 }
 
-async function confirmCross(eng, cards) {
+/** Lo marcado pasa directamente al catálogo (sin paso de confirmación) */
+async function aplicarExtras(eng, cards) {
   const R = quote.reco;
   const marc = cards.filter(c => c && c.key in R.marcados);
   quote.extras = marc.map(c => {
@@ -458,8 +461,6 @@ async function confirmCross(eng, cards) {
     return { key: c.key, pi: c.pi, vi: v?.idx ?? null, ref: v?.ref || '', title: v?.detalle?.replace(/^Descripción:\s*/, '') || '', badge: c.badge };
   });
   for (const c of marc) if (!R.aprendidos.includes(c.key)) { R.aprendidos.push(c.key); await aprender(eng, c, 'added'); evento(c, 'añadida'); }
-  await persist();
-  location.hash = `#/q/${quote.id}/catalogo`;
 }
 
 // ── Catálogo A4 ───────────────────────────────────────────────────────────
@@ -469,8 +470,8 @@ async function showCatalog(id) {
   nav(''); if (!(await load(id))) return (location.hash = '#/');
   mixa.setPhrases(FRASES.pdf);
   document.title = `Catálogo ${quote.offer || ''} · Disset Odiseo`;
-  view.innerHTML = `<div class="bar noprint"><div><p class="kicker">Paso 4 · Catálogo</p><h1>Catálogo para el cliente</h1><p class="muted" id="pinfo">Maquetando…</p></div>
-    <div class="bar-actions"><a class="btn ghost" href="#/q/${quote.id}">Líneas</a><a class="btn ghost" href="#/q/${quote.id}/venta">Venta cruzada</a><button class="btn" id="print">Guardar como PDF</button></div></div>
+  view.innerHTML = `<div class="bar noprint"><div><p class="kicker">Paso 3 · Catálogo</p><h1>Catálogo para el cliente</h1><p class="muted" id="pinfo">Maquetando…</p></div>
+    <div class="bar-actions"><a class="btn ghost" href="#/q/${quote.id}">Volver a las líneas</a><button class="btn" id="print">Guardar como PDF</button></div></div>
     <div id="sent" class="noprint sent"></div>
     <div id="pages" class="pages"></div>`;
   const n = await renderCatalog($('#pages'), quote, cat, footerText());
@@ -526,6 +527,10 @@ async function publicarPotenciales(sel) {
 
 // ── Agenda comercial: estados, próximas acciones encadenadas y recordatorios ─────────
 let agendaFiltro = 'activos';
+const abiertas = new Set();          // presupuestos desplegados en la agenda
+let avisoAg = null;                  // {id, texto}: confirmación visible tras «✓ Hecha»
+const MIN_DIAS = 2;                  // la siguiente acción, como mínimo a 2 días
+const diaLargo = f => { const d = new Date(f + 'T12:00:00'); return `${d.toLocaleDateString('es-ES', { weekday: 'long' })} ${fmt(f).slice(0, 5)}`; };
 const TIPOS = { llamada: 'llamada', email: 'email', visita: 'visita' };
 const hoy = () => isoLocal(new Date());
 function isoLocal(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
@@ -591,7 +596,8 @@ async function showAgenda() {
     <div class="chips" role="tablist">${FIL.map(([k, t]) => `<button role="tab" class="chip${agendaFiltro === k ? ' on' : ''}" aria-selected="${agendaFiltro === k}" data-f="${k}">${t} <span>${n(k)}</span></button>`).join('')}</div>
     <div class="ag-list">${lista.length ? lista.map(agRow).join('') : '<div class="card"><p class="muted">Nada por aquí.</p></div>'}</div>`;
   view.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { if (b.dataset.f === 'aceptado') { location.hash = '#/pedidos'; return; } agendaFiltro = b.dataset.f; showAgenda(); });
-  view.querySelectorAll('[data-go]').forEach(a => a.onclick = e => { e.preventDefault(); agendaFiltro = 'activos'; document.getElementById('ag-' + a.dataset.go)?.scrollIntoView({ behavior: 'smooth' }); });
+  view.querySelectorAll('[data-go]').forEach(a => a.onclick = async e => { e.preventDefault(); agendaFiltro = 'activos'; abiertas.add(a.dataset.go); await showAgenda();
+    document.getElementById('ag-' + a.dataset.go)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); });
   view.querySelector('.rec').addEventListener('click', agClick);
   view.querySelector('.ag-list').addEventListener('click', agClick);
   view.querySelector('.ag-list').addEventListener('change', agChange);
@@ -599,11 +605,18 @@ async function showAgenda() {
 }
 function agRow(q) {
   const a = q.agenda || {}, t = pendiente(q), hechas = tareas(q).filter(x => x.hecha);
-  const tarde = t && t.fecha < hoy() && !cerrado(q);
-  return `<article class="card ag-row" id="ag-${q.id}" data-id="${q.id}">
-    <div class="ag-head"><a class="ag-title" href="#/q/${q.id}">Oferta ${esc(q.offer || 'sin número')}</a>
-      <span class="muted small">${esc(q.date || '')} · ${q.lines.filter(l => l.include !== false).length} líneas${q.extras?.length ? ` · ${q.extras.length} de venta cruzada` : ''}</span>
-      <span class="pill ${q.status === 'aceptado' ? 'pill-ok' : q.status === 'perdido' ? 'pill-none' : 'pill-warn'}">${QST[q.status] || q.status}</span></div>
+  const tarde = t && t.fecha < hoy() && !cerrado(q), open = abiertas.has(q.id);
+  const aviso = avisoAg?.id === q.id ? `<div class="ag-ok" role="status">${esc(avisoAg.texto)}</div>` : '';
+  const head = `<button class="ag-sum" type="button" data-toggle="${q.id}" aria-expanded="${open}">
+      <span class="ag-sum-main"><b>Oferta ${esc(q.offer || 'sin número')}</b> <span class="muted small">${esc(q.date || '')}${a.cliente ? ' · ' + esc(a.cliente) : ''}</span>
+        <span class="ag-sum-prod">${resumenProductos(q) || '<span class="muted">Sin productos</span>'}</span></span>
+      <span class="ag-sum-next${tarde ? ' late' : ''}">${t && !cerrado(q) ? `${nombreTarea(q, t)} · ${diaLargo(t.fecha)}` : '<span class="muted">Sin acción pendiente</span>'}</span>
+      <span class="pill ${q.status === 'aceptado' ? 'pill-ok' : q.status === 'perdido' ? 'pill-none' : 'pill-warn'}">${QST[q.status] || q.status}</span>
+      <span class="ag-chev" aria-hidden="true">${open ? '▴' : '▾'}</span></button>`;
+  if (!open) return `<article class="card ag-row closed" id="ag-${q.id}" data-id="${q.id}">${head}${aviso}</article>`;
+  return `<article class="card ag-row" id="ag-${q.id}" data-id="${q.id}">${head}${aviso}
+    <div class="ag-body">
+    <div class="row-end"><a class="lnk" href="#/q/${q.id}">Abrir la oferta (líneas y catálogo) ›</a></div>
     ${productosHTML(q)}
     <div class="ag-st" role="group" aria-label="Estado">${AGENDA_ST.map(s => `<button class="seg${q.status === s ? ' on' : ''}" data-st="${s}" aria-pressed="${q.status === s}">${QST[s]}</button>`).join('')}</div>
     ${cerrado(q) ? '' : t ? `<div class="ag-next${tarde ? ' late' : ''}" data-t="${t.id}"><span class="ag-lbl">Próxima acción: <b>${nombreTarea(q, t)}</b></span>
@@ -619,9 +632,11 @@ function agRow(q) {
       <label class="ag-chk"><input type="checkbox" data-k="compartirCliente" ${a.compartirCliente ? 'checked' : ''}> Compartir con dirección</label>
       <label class="fld-col">Importe (opcional)<input type="number" min="0" step="0.01" data-k="importe" value="${esc(a.importe ?? '')}" placeholder="€"></label>
       <label class="ag-chk"><input type="checkbox" data-k="compartirImporte" ${a.compartirImporte ? 'checked' : ''}> Compartir importe</label>
-    </div></article>`;
+    </div></div></article>`;
 }
 async function agClick(e) {
+  const tg = e.target.closest('[data-toggle]');
+  if (tg) { const id = tg.dataset.toggle; abiertas.has(id) ? abiertas.delete(id) : abiertas.add(id); avisoAg = null; return showAgenda(); }
   const b = e.target.closest('[data-st], [data-act]'); if (!b) return;
   const id = b.closest('[data-id]')?.dataset.id; if (!id) return;
   quote = await db.get('quotes', id); tareas(quote);
@@ -635,11 +650,13 @@ async function agClick(e) {
     if (!t) return;
     t.hecha = true; t.hechaEl = hoy();
     if (!cerrado(quote)) {
-      programar(quote, t.tipo, quote.agenda.intervalo || 3);
+      programar(quote, t.tipo, Math.max(MIN_DIAS, quote.agenda.intervalo || 3));
       const sig = pendiente(quote);
-      mixa.say(`Hecha. Te dejo la ${nombreTarea(quote, sig)} para el ${fmt(sig.fecha)}.`);
+      avisoAg = { id: quote.id, texto: `✓ ${nombreTarea(quote, t)} hecha. Siguiente: ${nombreTarea(quote, sig)} el ${diaLargo(sig.fecha)}.` };
+      abiertas.add(quote.id);
+      mixa.say(`Hecha. Te dejo la ${nombreTarea(quote, sig)} para el ${diaLargo(sig.fecha)}.`);
     }
-  } else if (b.dataset.act === 'nueva') programar(quote, 'llamada', 1);
+  } else if (b.dataset.act === 'nueva') programar(quote, 'llamada', MIN_DIAS);
   else return;
   syncSeg(quote); await persist(); showAgenda();
 }
@@ -686,7 +703,7 @@ async function showPedidos() {
     if (!confirm('¿Devolver esta oferta a «Negociándose»? Saldrá de Pedidos y volverá a la agenda.')) return;
     quote = await db.get('quotes', b.dataset.reabrir); tareas(quote);
     quote.status = 'negociando'; delete quote.agenda.pedidoEl;
-    if (!pendiente(quote)) programar(quote, 'llamada', 1);
+    if (!pendiente(quote)) programar(quote, 'llamada', MIN_DIAS);
     syncSeg(quote); await persist(); showPedidos();
   });
 }
@@ -695,7 +712,8 @@ async function showPedidos() {
 function productos(q) {
   const ls = q.lines.filter(l => l.include !== false).map(l => {
     const p = l.match?.pi != null ? cat.product(l.match.pi) : null;
-    return { group: l.group || '', ref: l.ref || '', qty: l.qty, name: p ? p.name : (l.title || l.text || '').slice(0, 80) };
+    const propio = !p || (esAproximado(l) && l.foto !== true);   // producto distinto de la ficha: su propia descripción
+    return { group: l.group || '', ref: l.ref || '', qty: l.qty, name: propio ? (l.title || l.text || p?.name || '').slice(0, 80) : p.name };
   });
   for (const e of q.extras || []) { const p = cat.product(e.pi); if (p) ls.push({ group: 'Venta cruzada', ref: e.ref || '', qty: null, name: p.name }); }
   return ls;
@@ -726,6 +744,15 @@ function notasHTML(q, compacto = false) {
       : `<p class="muted small nota-vacia">Sin notas todavía.</p>`}
   </section>`;
 }
+/** Las notas son pista para la venta cruzada: se recalculan las propuestas no añadidas */
+async function notasCambiadas(q) {
+  const sec = $('#xs-sec');
+  if (!sec || quote?.id !== q.id) return;
+  xs = null;
+  if (quote.reco) quote.reco.cards = (quote.reco.cards || []).map(k => k && k in quote.reco.marcados ? k : null);
+  await renderCross(sec);
+  if (q.notas?.length) mixa.say('He revisado la venta cruzada con lo que has apuntado.');
+}
 function bindNotas(sec) {
   if (!sec) return;
   const compacto = !sec.classList.contains('card');
@@ -737,6 +764,7 @@ function bindNotas(sec) {
     await saveQuote(q); if (quote?.id === q.id) quote.notas = q.notas;
     redraw(q);
     mixa.say('Apuntado. Lo tendrás aquí cuando vuelvas a llamar.');
+    await notasCambiadas(q);
   };
   const redraw = q => {
     const tmp = document.createElement('div'); tmp.innerHTML = notasHTML(q, compacto);
@@ -753,6 +781,7 @@ function bindNotas(sec) {
       q.notas = (q.notas || []).filter(n => n.id !== b.closest('[data-n]').dataset.n);
       await saveQuote(q); if (quote?.id === q.id) quote.notas = q.notas;
       redraw(q);
+      await notasCambiadas(q);
     }
   });
   sec.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.target.matches('textarea')) { e.preventDefault(); guardar(); } });

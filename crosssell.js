@@ -23,7 +23,7 @@ const VACIAS = new Set('zona zonas pedido cliente mismo misma puesto antes cuand
 const NOMBRE_POT = { armarios_vestuario: /taquill|vestuario|armario/i, cajas_athena: /caja/i, cajas_nexit: /caja/i };
 const NOMBRE_EST = /estanter|estructura/i;
 // Fichas de nicho: solo si el pedido o la relación hablan de ese nicho
-const NICHO = /motocicleta|ganado|patinaje|niños|hospital|deportiv|gimnasio|lavander|hotel|comedor|ESD|ATEX|antiexplosi|soldadura|ladrillos|adoquines/i;
+const NICHO = /dom[eé]stic|motocicleta|ganado|patinaje|niños|hospital|deportiv|gimnasio|lavander|hotel|comedor|ESD|ATEX|antiexplosi|soldadura|ladrillos|adoquines/i;
 const QUIMICOS = /^(armarios_seguridad|almacenes_quimicos|cubetos_retencion|bidones_seguridad|manipulacion_bidones|absorbentes)$/;
 
 // Textos de los potenciales (tarjetas 1 y 3)
@@ -37,6 +37,19 @@ const POT = {
   cajas_nexit: ['Picking y puestos de trabajo: cajas de logística para tener el material a mano.', 'Encajan en estructuras de picking y bancos de trabajo.'],
 };
 
+// ── Notas del cliente como pista ─────────────────────────────────────────
+// Palabras que no dicen qué producto quiere el cliente
+const NOTA_VACIAS = new Set(('quiere quieren necesita necesitan pide piden tambien también cliente clientes llamar llamada llamo jueves lunes martes miercoles miércoles viernes sabado domingo semana mes '
+  + 'plazo entrega precio presupuesto oferta hablar habla dice dicho comentado interesa interesado gerencia compras pedido pedir mandar enviar enviado catalogo catálogo ver mirar '
+  + 'para con sin que los las del una unos unas por mas más muy bien todo toda todos todas este esta estos estas ese esa eso tiene tienen hay hacer poner otro otra otros otras '
+  + 'antes despues después ahora luego hoy mañana manana tarde pronto rapido rápido urgente cuanto cuantos cuando donde como sobre entre hasta desde nave empresa persona personas '
+  + 'nuevo nueva nuevos nuevas grande grandes pequeño pequeña algo alguna alguno').split(' '));
+function notaTokens(texto) {
+  return [...new Set(tokens(texto).filter(t => t.length >= 4 && !/^\d/.test(t) && !NOTA_VACIAS.has(t)))];
+}
+// misma palabra o plural/singular (báscula ≠ basculante)
+const notaHit = (t, pt) => pt.some(x => x === t || (x.startsWith(t) && x.length - t.length <= 2) || (t.startsWith(x) && t.length - x.length <= 2));
+
 export class CrossSell {
   /**
    * @param cat      Catálogo
@@ -48,6 +61,7 @@ export class CrossSell {
     this.muy = opts.muyCompatible ?? 70;
     if (!cat._vby) { cat._vby = new Map(); for (const v of cat.variants) { if (!cat._vby.has(v.pi)) cat._vby.set(v.pi, []); cat._vby.get(v.pi).push(v); } }
     this.ctx = this.contexto(quote);
+    this.nota = notaTokens((quote.notas || []).map(n => n.texto).join(' . '));   // lo que el cliente ha dicho (solo en local)
     this.byKey = new Map(); this.cov = new Map();
     this.q1 = this.potencial(1); this.q3 = this.potencial(3);
     this.general = this.generales();
@@ -105,6 +119,7 @@ export class CrossSell {
         this.cov.set(p.idx, cov);
         return [p, 1.6 * cov + cabeza + 0.4 * jaccard(this.ctx.tokArr, p.tokens) + (p.photo ? 0.3 : 0)
           + ((this.cat._vby.get(p.idx) || []).length ? 0.4 : 0) + this.ajuste(p) / 100
+          + 0.6 * this.nota.filter(t => notaHit(t, p.tokens)).length
           - (NICHO.test(p.name) && !NICHO.test(texto) && !NICHO.test(this.ctx.nombres) ? 0.8 : 0)];
       })
       .sort((a, b) => b[1] - a[1]).slice(0, n).map(x => x[0]);
@@ -118,13 +133,15 @@ export class CrossSell {
   cand(p, o) {
     const key = `p${p.idx}`;
     const prev = this.byKey.get(key);
-    const score = Math.max(0, Math.min(99, Math.round(o.score + this.ajuste(p))));
+    const score = Math.max(0, Math.min(99, Math.round(o.score + this.ajuste(p) + (o.fuente !== 'N' ? Math.min(20, 8 * this.nota.filter(t => notaHit(t, p.tokens)).length) : 0))));
     if (prev && !(o.slot && !prev.slot) && prev.score >= score) return prev;   // nos quedamos con la mejor razón
     let motivo = o.motivo || '';
+    const enNota = o.fuente === 'N' ? [] : this.nota.filter(t => notaHit(t, p.tokens));
+    if (enNota.length) { o = { ...o, score: o.score + Math.min(20, 8 * enNota.length) }; motivo = `Encaja con tus notas («${enNota.slice(0, 3).join('», «')}»). ` + motivo; }
     if (QUIMICOS.test(p.familia) && !o.slot) motivo += ' Comprobar compatibilidad con el producto almacenado.';
     const c = { key, pi: p.idx, fa: p.familia, grupo: grupo(p.familia), serie: p.serie || '', slot: o.slot || 0, tipo: o.tipo,
       fuente: o.fuente, score, motivo: motivo.trim(), beneficio: o.beneficio || '', evidencia: o.evidencia || '', regla: o.regla || '' };
-    c.badge = c.slot ? 'Potencial' : c.tipo === 'Completa tu pedido' ? 'Completa tu pedido'
+    c.badge = c.slot ? 'Potencial' : c.fuente === 'N' ? 'Según tus notas' : c.tipo === 'Completa tu pedido' ? 'Completa tu pedido'
       : c.fuente === 'B' && score >= this.muy ? 'Muy compatible' : c.fuente === 'B' && score >= this.cat.umbral ? 'Compatible' : 'Oportunidad';
     this.byKey.set(key, c);
     return c;
@@ -163,6 +180,27 @@ export class CrossSell {
   // ── Tarjetas 2, 4, 5 y 6 ───────────────────────────────────────────────
   generales() {
     const cat = this.cat, ctx = this.ctx, out = [];
+    // N · Lo que el cliente ha pedido en las notas (p. ej. «también quieren una báscula»)
+    if (this.nota.length) {
+      const porFam = new Map();
+      for (const p of cat.products) {
+        if (!p.web || p.isAccessory || NO_PRINCIPAL.test(p.name) || ctx.pis.has(p.idx) || !p.familia || ctx.fams.has(p.familia)) continue;
+        const nombre = tokens(p.name), hits = this.nota.filter(t => notaHit(t, nombre));
+        if (!hits.length) continue;
+        const cabeza = hits.some(t => notaHit(t, nombre.slice(0, 1)));    // «Básculas de…», «Taquillas…»: lo pedido es el producto, no un accesorio suyo
+        const peso = hits.length + (cabeza ? 2 : 0) + (p.photo ? 0.2 : 0) + ((this.cat._vby.get(p.idx) || []).length ? 0.3 : 0)
+          - (NICHO.test(p.name) ? 1 : 0) - (ESPECIAL.test(`${p.name} ${p.desc}`) ? 1.5 : 0) - (QUIMICOS.test(p.familia) ? 1.5 : 0);
+        const best = porFam.get(p.familia);
+        if (!best || peso > best.peso) porFam.set(p.familia, { p, hits, peso });
+      }
+      const pedidas = new Set();   // una propuesta por cada cosa pedida («escaleras» → una escalera, no dos)
+      [...porFam.values()].filter(x => x.peso >= 2.5).sort((a, b) => b.peso - a.peso)
+        .filter(x => { if (x.hits.every(t => pedidas.has(t))) return false; x.hits.forEach(t => pedidas.add(t)); return true; })
+        .slice(0, 4).forEach(({ p, hits, peso }) =>
+        out.push(this.cand(p, { tipo: 'Según tus notas', fuente: 'N', score: Math.min(88, 55 + 10 * Math.floor(peso)),
+          motivo: `Lo has apuntado en las notas del cliente («${hits.slice(0, 3).join('», «')}»).`,
+          beneficio: 'Responde a algo que el cliente ya ha pedido.', evidencia: 'Notas del comercial (no salen del ordenador)' })));
+    }
     // A · Completa tu pedido: accesorios de fichas presupuestadas
     const ids = new Set([...ctx.pis].map(i => cat.product(i).id));
     for (const a of cat.A) {
@@ -207,6 +245,18 @@ export class CrossSell {
         motivo: `De la misma sección que lo presupuestado (${p.seccion.toLowerCase()}).`, beneficio: 'Amplía la propuesta sin salir de lo que ya interesa al cliente.',
         evidencia: 'Cercanía de catálogo, sin relación técnica verificada' }));
     }
+    // U · Mismo ámbito de uso (obra, taller, almacén…): para productos con pocas relaciones, antes que dejar huecos
+    const USO = { obra_exterior: 'obra y exteriores', taller_produccion: 'taller y producción', almacen_transporte: 'almacén y transporte', almacen_picking: 'almacén y picking',
+      manutencion: 'manutención', quimicos: 'productos químicos', seguridad_planta: 'seguridad en planta', reparto: 'reparto', mantenimiento: 'mantenimiento',
+      vestuarios_personal: 'vestuarios', puesto_trabajo: 'puesto de trabajo', oficina: 'oficina', instalaciones: 'instalaciones', combustible_taller: 'taller', almacen_carga: 'almacén' };
+    const ya = new Set(out.map(c => c.fa));
+    for (const [fa, f] of Object.entries(cat.F)) {
+      if (!ctx.usos.has(f.u) || ctx.fams.has(fa) || ya.has(fa) || rel.has(fa) || nivel2.has(fa)) continue;
+      const p = this.mejores(fa, 1, undefined, cat.familyLabel(fa))[0];
+      if (p) out.push(this.cand(p, { tipo: 'Producto cercano', fuente: 'E', score: 18 + Math.round(jaccard(ctx.tokArr, p.tokens) * 30),
+        motivo: `Mismo ámbito que lo presupuestado (${USO[f.u] || f.u.replace(/_/g, ' ')}): ${cat.familyLabel(fa).toLowerCase()}.`,
+        beneficio: 'Completa la propuesta para el mismo tipo de trabajo.', evidencia: 'Mismo ámbito de uso, sin relación técnica verificada' }));
+    }
     const uniq = [...new Set(out)].filter(c => this.byKey.get(c.key) === c && !c.slot);
     return uniq.sort((a, b) => b.score - a.score);
   }
@@ -221,7 +271,7 @@ export class CrossSell {
       if (!c.slot && ctx.grupos.has(c.grupo) && (['cajas', 'estanterias', 'taquillas', 'armarios', 'sillas', 'mesas'].includes(c.grupo) || 'DE'.includes(c.fuente))) return false;
     }
     if (ctx.movil && CON_RUEDAS.test(c.fa) && !ctx.palets) return false;     // ya lleva ruedas
-    if (!c.slot && ctx.transporte && !ctx.estatico && F.e) return false;     // transporte ≠ almacenaje estático
+    if (!c.slot && c.fuente !== 'N' && ctx.transporte && !ctx.estatico && F.e) return false;     // transporte ≠ almacenaje estático (salvo que el cliente lo pida)
     for (const e of elegidos) {
       if (e === c) continue;
       if (e.pi === c.pi || e.fa === c.fa || e.grupo === c.grupo || (c.serie && e.serie === c.serie)) return false;
