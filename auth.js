@@ -37,6 +37,14 @@ export async function profile() {
 }
 
 export const isAdmin = p => !!p?.roles?.some(r => r === 'admin' || r === 'ceo');
+/** Secciones del menú por rol. Comercial: su trabajo. CEO: agenda del equipo y dirección. Admin: todo. */
+export function secciones(p, remote) {
+  if (!remote) return ['home', 'agenda', 'pedidos', 'hist', 'equipo', 'panel'];          // modo local (demo): todo
+  const r = new Set(p?.roles || []), s = new Set();
+  if (r.has('comercial') || r.has('admin')) ['home', 'agenda', 'pedidos', 'hist'].forEach(x => s.add(x));
+  if (r.has('ceo') || r.has('admin')) ['equipo', 'panel'].forEach(x => s.add(x));
+  return [...s];
+}
 
 export async function signIn(email, password) {
   const { error } = await client.auth.signInWithPassword({ email: email.trim(), password });

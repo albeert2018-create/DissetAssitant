@@ -11,6 +11,8 @@ export const AD_HOC = /^KF\d/;
 const SINONIMOS = { malla: 'rejadas', mallado: 'rejadas', rejilla: 'rejadas', enrejado: 'rejadas', inox: 'inoxidable',
   galvanizada: 'galvanizado', taquilla: 'taquillas', estanteria: 'estanterias', jaula: 'roll' };
 const tituloClave = line => 'KF:' + tokens(line.title || line.text || '').filter(t => t.length > 2 && !/\d/.test(t)).slice(0, 8).join(' ');
+/** ¿El producto ofertado puede no ser exactamente el de la ficha? (encontrado por descripción, no por código) */
+export const esAproximado = l => !!l.match && l.match.pi != null && (l.match.aprox ?? (l.match.status === STATUS.REVIEW || (AD_HOC.test(normRef(l.ref)) && !/^Código exacto/.test(l.match.why || ''))));
 /** Clave con la que se guarda y busca una corrección */
 export const correctionKey = line => (AD_HOC.test(normRef(line.ref)) ? tituloClave(line) : normRef(line.ref));
 
@@ -90,7 +92,7 @@ export class Matcher {
   /** Código creado para la oferta: manda la descripción */
   matchAdHoc(line, ref, tq) {
     const c = this.corr.get(tituloClave(line));
-    if (c) { const v = this.cat.variants[c.vi]; if (v && v.refNorm === c.refNorm) return this.res(v, 0.95, `Código de oferta (${line.ref}). Corrección guardada para esta descripción → ${v.ref}`); }
+    if (c) { const v = this.cat.variants[c.vi]; if (v && v.refNorm === c.refNorm) return { ...this.res(v, 0.95, `Código de oferta (${line.ref}). Corrección guardada para esta descripción → ${v.ref}`), aprox: true }; }
     const exact = this.cat.byRef.get(ref);
     if (exact) {   // coincide con un código real del catálogo: solo vale si la descripción también encaja
       const v = this.pick(exact, tq), p = this.cat.product(v.pi);
@@ -116,7 +118,7 @@ export class Matcher {
     if (!p.web || n < 2 || cov < 0.5) return null;
     const v = best.idx != null ? best : this.cat.variants.find(x => x.pi === p.idx) || { idx: null, pi: p.idx };
     return { vi: v.idx ?? null, pi: p.idx, confidence: Math.round(Math.min(0.75, 0.3 + cov * 0.5) * 100) / 100,
-             why: `Código no publicado en la web. Ficha parecida por nombre (${Math.round(cov * 100)} %): confírmala o corrígela`, status: STATUS.REVIEW };
+             why: `Código no publicado en la web. Ficha parecida por nombre (${Math.round(cov * 100)} %): confírmala o corrígela`, status: STATUS.REVIEW, aprox: true };
   }
 
   /** El comercial corrige: se guarda para que la próxima lectura acierte sola */

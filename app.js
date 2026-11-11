@@ -1,14 +1,14 @@
 import { db, saveQuote, exportBackup, importBackup, MAX_QUOTES, protegerAlmacen } from './db.js';
 import { esc, uuid, normRef, normText } from './util.js';
 import { Catalog } from './catalog.js';
-import { Matcher, STATUS, correctionKey } from './matcher.js';
+import { Matcher, STATUS, correctionKey, AD_HOC, esAproximado } from './matcher.js';
 import { readQuote } from './reader.js';
 import { renderCatalog } from './layout.js';
 import { Mascot } from './mascot.js';
 import { CrossSell } from './crosssell.js';
 import * as auth from './auth.js';
 import { queue, flush, fetchRules } from './sync.js';
-import { demoData, serverData, renderPanel } from './panel.js';
+import { demoData, serverData, renderPanel, renderEquipo } from './panel.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const view = $('#view');
@@ -17,7 +17,7 @@ const ST = {
   seguro: ['Seguro', 'pill-ok'], revisar: ['Por confirmar', 'pill-warn'], sin_ficha: ['Sin ficha', 'pill-none'],
 };
 let cat, matcher, mixa, perfil, quote = null, openFix = null;
-let me = null, remote = false;   // usuario conectado (perfil del servidor) y si hay servidor configurado
+let me = null, remote = false, permitidas = [];   // usuario conectado (perfil del servidor) y si hay servidor configurado
 const QST = { en_preparacion: 'En preparación', catalogo_generado: 'Catálogo generado', enviado: 'Enviado',
   negociando: 'Negociándose', aceptado: 'Pedido', perdido: 'Perdido' };   // «aceptado» se muestra como «Pedido»
 const AGENDA_ST = ['enviado', 'negociando', 'aceptado', 'perdido'];
@@ -61,8 +61,9 @@ async function init() {
   }
   userChip();
   protegerAlmacen();
-  const pn = $('a[data-nav=panel]');
-  if (pn) { pn.hidden = remote && !auth.isAdmin(me); if (!remote) pn.textContent = 'Dirección (demo)'; }
+  permitidas = auth.secciones(me, remote);
+  document.querySelectorAll('.nav a[data-nav]').forEach(a => { a.hidden = !permitidas.includes(a.dataset.nav); });
+  if (!remote) { $('a[data-nav=panel]').textContent = 'Dirección (demo)'; $('a[data-nav=equipo]').textContent = 'Agenda comercial (demo)'; }
   window.addEventListener('hashchange', route);
   document.addEventListener('paste', onPaste);
   $('#btn-ajustes').addEventListener('click', openSettings);
@@ -179,9 +180,15 @@ async function syncNow() {
   el.title = r.error ? 'Se reintentará: ' + r.error : 'Al servidor solo van código, ficha, cantidad y estado. Nunca precios ni datos del cliente.';
 }
 
+const SECCION = h => /^#\/q\//.test(h) ? 'home' : h.startsWith('#/historial') ? 'hist' : h.startsWith('#/agenda') ? 'agenda'
+  : h.startsWith('#/pedidos') ? 'pedidos' : h.startsWith('#/equipo') ? 'equipo' : h.startsWith('#/panel') ? 'panel' : 'home';
 function route() {
   const h = location.hash;
   let m;
+  if (permitidas.length && !permitidas.includes(SECCION(h))) {   // sección no permitida para este rol: a la suya
+    location.replace(permitidas.includes('home') ? '#/' : '#/equipo'); return;
+  }
+  if (h.startsWith('#/equipo')) return showEquipo();
   if ((m = h.match(/^#\/q\/([\w-]+)\/catalogo/))) return showCatalog(m[1]);
   if ((m = h.match(/^#\/q\/([\w-]+)\/venta/))) return showCross(m[1]);
   if ((m = h.match(/^#\/q\/([\w-]+)/))) return showLines(m[1]);
@@ -293,7 +300,7 @@ async function showLines(id) {
         <div class="ln-why muted" title="${esc(l.match.why)}">${esc(p ? (l.title || '') : l.match.why)}</div></div>
       <div class="ln-dim muted">${esc(l.dims || '')}</div>
       <div><span class="pill ${cls}" title="${esc(l.match.why)} · confianza ${Math.round(l.match.confidence * 100)} %">${label}</span></div>
-      <div class="ln-act"><button class="lnk" data-act="fix">Corregir</button><button class="lnk muted" data-act="toggle">${l.include === false ? 'Incluir' : 'Quitar'}</button></div>
+      <div class="ln-act">${p ? `<button class="lnk ${conFoto(l) ? '' : 'muted'}" data-act="foto" title="${conFoto(l) ? 'Sale con la foto de la ficha. Pulsa para quitarla si el producto no es exactamente ese.' : 'Sale sin foto (el producto ofertado no es exactamente el de la ficha). Pulsa para mostrarla.'}">${conFoto(l) ? 'Foto: sí' : 'Foto: no'}</button>` : ''}<button class="lnk" data-act="fix">Corregir</button><button class="lnk muted" data-act="toggle">${l.include === false ? 'Incluir' : 'Quitar'}</button></div>
     </div>${openFix === l.id ? fixPanel(l) : ''}`;
     return out;
   }).join('');
@@ -340,16 +347,20 @@ async function onLineClick(e) {
   if (act === 'close') { openFix = null; return showLines(quote.id); }
   if (act === 'toggle') { l.include = l.include === false; touchLines(); await persist(); return showLines(quote.id); }
   if (act === 'search') return doSearch();
+  if (act === 'foto') { l.foto = !conFoto(l); await persist(); return showLines(quote.id); }
   if (act === 'pick') {
     const pi = +b.dataset.pi, vi = b.dataset.vi === '' ? null : +b.dataset.vi;
     const v = vi != null ? cat.variants[vi] : null;
     if (l.ref && v) { await matcher.learn(l, v); if (remote) await queue.learn('correccion', correctionKey(l), { ref: v.ref, ficha: cat.product(v.pi).id }); }
-    l.match = { pi, vi, confidence: 1, why: 'Corregido por el comercial', status: STATUS.OK };
+    l.match = { pi, vi, confidence: 1, why: 'Corregido por el comercial', status: STATUS.OK, aprox: AD_HOC.test(normRef(l.ref)) };
     if (!l.ref && v) l.ref = v.ref;
     openFix = null; touchLines(); await persist(); mixa.say('Apuntado. La próxima vez esa la clavo yo solita.');
     return showLines(quote.id);
   }
 }
+
+/** Foto en el catálogo: la decide el comercial; si no, solo cuando el producto es exactamente el de la ficha */
+function conFoto(l) { return l.foto ?? !esAproximado(l); }
 
 // ── Venta cruzada: seis tarjetas ───────────────────────────────────────────
 const BADGE = { 'Potencial': 'b-pot', 'Completa tu pedido': 'b-ok', 'Muy compatible': 'b-ok', 'Compatible': 'b-lav', 'Oportunidad': 'b-warn' };
@@ -482,11 +493,22 @@ function showSentPrompt() {
   if (b) b.onclick = async () => { quote.status = 'enviado'; quote.agenda = { ...(quote.agenda || {}), enviadoEl: hoy() }; if (!pendiente(quote)) programar(quote, 'llamada', 3); await persist(); mixa.say(`Enviado. Te he programado la 1ª llamada para el ${fmt(pendiente(quote).fecha)}.`); showSentPrompt(); };
 }
 
+// ── Agenda comercial del equipo (CEO y admin, solo lectura) ──────────────
+async function showEquipo() {
+  nav('equipo'); document.title = 'Agenda comercial · Disset Odiseo';
+  mixa.setPhrases(['Aquí ves qué tiene cada comercial para hoy y qué va atrasado.', 'Solo lectura: cada comercial gestiona su propia agenda.']);
+  view.innerHTML = `<div class="loading"><div class="spinner"></div>Cargando agenda del equipo…</div>`;
+  let D;
+  try { D = remote ? await serverData(cat) : demoData(cat); }
+  catch (e) { view.innerHTML = `<div class="card err">No se pudo cargar la agenda del equipo: ${esc(e.message)}</div>`; return; }
+  renderEquipo(view, D);
+}
+
 // ── Panel de dirección (Fase 6) ───────────────────────────────────────────
 async function showPanel() {
   nav('panel'); document.title = 'Panel de dirección · Disset Odiseo';
   mixa.setPhrases(['Lo que no se mide, no se mejora. Ni se vende.', '«Añadida al catálogo» no es venta cerrada. Que no te engañe el gato.']);
-  if (remote && !auth.isAdmin(me)) { view.innerHTML = '<div class="card"><p>Esta sección es solo para dirección y administración.</p></div>'; return; }
+
   view.innerHTML = `<div class="loading"><div class="spinner"></div>Cargando panel…</div>`;
   let D;
   try { D = remote ? await serverData(cat) : demoData(cat); }

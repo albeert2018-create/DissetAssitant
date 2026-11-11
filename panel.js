@@ -290,3 +290,37 @@ function descargarCSV(Q, D) {
     download: `presupuestos_equipo_${D.demo ? 'DEMO_' : ''}${iso(Date.now())}.csv` });
   a.click(); URL.revokeObjectURL(a.href);
 }
+
+// ── Agenda comercial del equipo (solo lectura) ─────────────────────────────
+const eq = { quien: 'todos', cuando: 'pendientes' };
+export function renderEquipo(view, D) {
+  const color = Object.fromEntries(D.people.map((u, i) => [u.id, SERIE[i % SERIE.length]]));
+  const hoy = iso(Date.now()), man = iso(Date.now() + DAY), sem = iso(Date.now() + 7 * DAY);
+  const abiertos = D.quotes.filter(q => ['enviado', 'negociando'].includes(q.status) && q.follow_up && (eq.quien === 'todos' || q.owner_id === eq.quien));
+  const grupo = f => f < hoy ? 'Atrasadas' : f === hoy ? 'Hoy' : f === man ? 'Mañana' : f <= sem ? 'Esta semana' : 'Más adelante';
+  const FIL = { pendientes: () => true, atrasadas: q => q.follow_up < hoy, hoy: q => q.follow_up === hoy, semana: q => q.follow_up >= hoy && q.follow_up <= sem };
+  const lista = abiertos.filter(FIL[eq.cuando]).sort((a, b) => a.follow_up.localeCompare(b.follow_up));
+  const G = ['Atrasadas', 'Hoy', 'Mañana', 'Esta semana', 'Más adelante'];
+  const porPersona = D.people.map(u => { const qs = D.quotes.filter(q => q.owner_id === u.id && ['enviado', 'negociando'].includes(q.status) && q.follow_up);
+    return { u, hoy: qs.filter(q => q.follow_up === hoy).length, tarde: qs.filter(q => q.follow_up < hoy).length, sem: qs.filter(q => q.follow_up > hoy && q.follow_up <= sem).length }; });
+  view.innerHTML = `
+  ${D.demo ? `<div class="demo-banner" role="note"><b>DEMO · datos ficticios.</b> Así verá dirección la agenda del equipo cuando se conecte el servidor.</div>` : ''}
+  <div class="bar"><div><p class="kicker">Dirección · solo lectura</p><h1>Agenda comercial</h1>
+    <p class="muted">Llamadas, emails y visitas pendientes del equipo. Cada comercial gestiona la suya.</p></div>
+    <div class="bar-actions pn-filters"><label class="fld">Comercial <select id="eq-quien"><option value="todos">Todo el equipo</option>${D.people.map(u => `<option value="${u.id}"${eq.quien === u.id ? ' selected' : ''}>${esc(u.full_name)}</option>`).join('')}</select></label></div></div>
+  <section class="kpis eq-kpis">${porPersona.map(p => `<button class="kpi card eq-p${eq.quien === p.u.id ? ' sel' : ''}" data-u="${p.u.id}"><span class="kpi-t"><i class="dot" style="background:${color[p.u.id]}"></i>${esc(p.u.full_name)}</span>
+    <b class="kpi-v">${p.hoy}</b><span class="kpi-s">para hoy · <span class="${p.tarde ? 'warn-t' : ''}">${p.tarde} atrasada${p.tarde === 1 ? '' : 's'}</span> · ${p.sem} esta semana</span></button>`).join('')}</section>
+  <div class="chips">${[['pendientes', 'Todas'], ['atrasadas', 'Atrasadas'], ['hoy', 'Hoy'], ['semana', 'Próximos 7 días']].map(([k, t]) => `<button class="chip${eq.cuando === k ? ' on' : ''}" data-c="${k}">${t} <span>${abiertos.filter(FIL[k]).length}</span></button>`).join('')}</div>
+  <section class="card rec">${lista.length ? G.map(g => { const xs = lista.filter(q => grupo(q.follow_up) === g); if (!xs.length) return '';
+    return `<div class="rec-g"><h3 class="${g === 'Atrasadas' ? 'late' : g === 'Hoy' ? 'today' : ''}">${g} <span>${xs.length}</span></h3>${xs.map(q => `<div class="rec-i">
+      <span class="rec-d">${fmt(q.follow_up)}</span>
+      <span class="rec-what"><i class="dot" style="background:${color[q.owner_id]}"></i><b>${esc(q.full_name.split(' ')[0])}</b> · ${esc(q.next_action || 'seguimiento')} (${(q.actions_done || 0) + 1}ª) · Oferta <span class="mono">${esc(q.offer_number || '—')}</span>${q.client_label ? ' · ' + esc(q.client_label) : ''}
+        <span class="rec-prod">${resumen(q)}</span></span>
+      <span class="pill ${q.status === 'negociando' ? 'pill-warn' : 'pill-none'}">${QST[q.status]}</span></div>`).join('')}</div>`; }).join('')
+    : '<p class="muted">No hay acciones pendientes con este filtro.</p>'}</section>
+  <p class="muted small">El cliente solo aparece si el comercial lo ha compartido. Las notas de cada comercial no se ven aquí: se quedan en su ordenador.</p>`;
+  const again = () => renderEquipo(view, D);
+  view.querySelector('#eq-quien').onchange = e => { eq.quien = e.target.value; again(); };
+  view.querySelectorAll('.eq-p').forEach(b => b.onclick = () => { eq.quien = eq.quien === b.dataset.u ? 'todos' : b.dataset.u; again(); });
+  view.querySelectorAll('[data-c]').forEach(b => b.onclick = () => { eq.cuando = b.dataset.c; again(); });
+}
