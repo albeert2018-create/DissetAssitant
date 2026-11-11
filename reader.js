@@ -197,6 +197,9 @@ function parse(rows, cat, cols) {
       cells = cells.filter(c => !cols.money.includes(c.col));       // columnas de precio: ni se leen
     }
     const hadMoney = cells.some(c => hasMoney(c.text));
+    // Formato «Cant. 5,00 · Precio 189,00 · Total 945,00»: con 2 o más cifras con decimales, la primera entera es la cantidad
+    const cifras = cells.flatMap(c => c.text.match(/(?<![\d.,])\d{1,3}(?:\.\d{3})*,\d{2}(?![\d,])/g) || []);
+    const qtyDec = cifras.length >= 2 && /^\d{1,4},00$/.test(cifras[0]) ? parseInt(cifras[0], 10) : null;
     cells = cells.filter(c => !isMoney(c.text)).map(c => ({ ...c, text: stripMoney(c.text) })).filter(c => c.text);
     const text = cells.map(c => c.text).join(' ').trim();
     if (!text) continue;
@@ -212,6 +215,7 @@ function parse(rows, cat, cols) {
       const qc = cells.find(c => (qtyCol != null ? c.col === qtyCol : c !== r.cell) && /^\d{1,4}(?:[.,]0+)?$/.test(c.text.trim()));
       if (qc) qty = parseInt(qc.text, 10);
       let body = rest.filter(t => !(qc && t === qc.text)).join(' ').replace(/\s+/g, ' ').trim();
+      if (qty == null && qtyDec) qty = qtyDec;
       if (qty == null && hadMoney) {
         const tail = (body || r.cell.text).match(/\s(\d{1,4})$/);
         if (tail) { qty = parseInt(tail[1], 10); if (body) body = body.slice(0, -tail[0].length).trim(); else r.cell.text = r.cell.text.slice(0, -tail[0].length); }

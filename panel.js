@@ -3,7 +3,7 @@
 import { esc } from './util.js';
 import { sb } from './auth.js';
 
-const QST = { en_preparacion: 'En preparación', catalogo_generado: 'Catálogo generado', enviado: 'Enviado', negociando: 'Negociándose', aceptado: 'Aceptado', perdido: 'Perdido' };
+const QST = { en_preparacion: 'En preparación', catalogo_generado: 'Catálogo generado', enviado: 'Enviado', negociando: 'Negociándose', aceptado: 'Pedido', perdido: 'Perdido' };
 const SERIE = ['#6D5BD0', '#eb6834', '#1baf7a', '#2a78d6'];   // validado: CVD ΔE ≥ 9, normal ≥ 24 (con etiquetas y tabla)
 const POT_FAM = { armarios_vestuario: 'Taquillas', estructuras_picking: 'Estanterías', estanterias_ligeras: 'Estanterías', estanterias_longspan: 'Estanterías',
   estanterias_paletizacion: 'Estanterías', cajas_athena: 'Cajas Athena', cajas_nexit: 'Cajas Nexit' };
@@ -40,7 +40,13 @@ export function demoData(cat) {
         follow_up: abierto ? iso(Math.max(created + 3 * DAY, now + (Math.floor(rnd() * 14) - 4) * DAY)) : null, next_action: abierto ? pick(['llamada', 'llamada', 'email', 'visita']) : null,
         actions_done: Math.floor(rnd() * (status === 'enviado' ? 2 : 5)),
         client_label: share ? pick(clientes) : null, total_amount: share && rnd() < 0.8 ? Math.round(800 + rnd() * 14000) : null,
-        lines_count: 2 + Math.floor(rnd() * 9), extras_count: Math.floor(rnd() * 3) });
+        lines_count: 0, extras_count: Math.floor(rnd() * 3), lines: [] });
+      const q = quotes.at(-1), nl = 2 + Math.floor(rnd() * 6), base = pick(prods);
+      const vecinos = prods.filter(p => p.familia === base.familia);
+      for (let j = 0; j < nl; j++) { const p = j === 0 ? base : pick(rnd() < 0.6 ? vecinos : prods);
+        q.lines.push({ product_name: p.name, ref: (cat.variantsOf(p.idx)[0] || {}).ref || '', quantity: 1 + Math.floor(rnd() * 20), is_extra: false }); }
+      for (let j = 0; j < q.extras_count; j++) { const p = pick(prods); q.lines.push({ product_name: p.name, ref: (cat.variantsOf(p.idx)[0] || {}).ref || '', quantity: null, is_extra: true }); }
+      q.lines_count = nl;
       for (let k = 0; k < 6; k++) {
         const potencial = k === 0 || k === 2;
         const pool = potencial ? prods.filter(p => POT_FAM[p.familia] && (k === 0 ? !/^cajas/.test(p.familia) : /^cajas_(athena|nexit)/.test(p.familia))) : prods;
@@ -55,7 +61,7 @@ export function demoData(cat) {
   const audit = [
     { at: new Date(now - 2 * DAY).toISOString(), actor: 'Mario Villaret', action: 'Publica potenciales', detail: 'Tarjeta 1: Taquillas, Estanterías · Tarjeta 3: Athena, Nexit' },
     { at: new Date(now - 6 * DAY).toISOString(), actor: 'Albert Rovira', action: 'Cambia rol', detail: 'Chema Domínguez → comercial' },
-    { at: new Date(now - 9 * DAY).toISOString(), actor: 'Manuel Sánchez', action: 'Cambia estado', detail: 'Oferta 26/01843 → Aceptado' },
+    { at: new Date(now - 9 * DAY).toISOString(), actor: 'Manuel Sánchez', action: 'Cambia estado', detail: 'Oferta 26/01843 → Pedido' },
   ];
   return { demo: true, people, quotes, events, audit, potenciales: cat.potenciales };
 }
@@ -63,19 +69,21 @@ export function demoData(cat) {
 /** Datos reales del servidor (RLS: solo admin/CEO con 2FA ven los de todo el equipo) */
 export async function serverData(cat) {
   const c = sb();
-  const [p, q, e, a, r] = await Promise.all([
+  const [p, q, e, ln, a, r] = await Promise.all([
     c.from('profiles').select('id, full_name, roles, active'),
     c.from('shared_quotes').select('*').is('deleted_at', null),
     c.from('recommendation_events').select('quote_id, product_ref, family, slot, action, created_at'),
+    c.from('shared_quote_lines').select('quote_id, position, ref, product_name, quantity, is_extra').order('position'),
     c.from('audit_log').select('at, actor, action, entity, detail').order('at', { ascending: false }).limit(50),
     c.from('rule_sets').select('version, payload').eq('is_current', true).maybeSingle(),
   ]);
-  for (const x of [p, q, e]) if (x.error) throw x.error;
+  for (const x of [p, q, e, ln]) if (x.error) throw x.error;
+  const lineas = new Map(); for (const l of ln.data) { if (!lineas.has(l.quote_id)) lineas.set(l.quote_id, []); lineas.get(l.quote_id).push(l); }
   const name = Object.fromEntries(p.data.map(x => [x.id, x.full_name]));
   const owner = Object.fromEntries(q.data.map(x => [x.id, x.owner_id]));
   return {
     demo: false, people: p.data.filter(x => x.active && x.roles.includes('comercial')),
-    quotes: q.data.map(x => ({ ...x, full_name: name[x.owner_id] || '—' })),
+    quotes: q.data.map(x => ({ ...x, full_name: name[x.owner_id] || '—', lines: lineas.get(x.id) || [] })),
     events: e.data.map(x => ({ ...x, owner_id: owner[x.quote_id] })),
     audit: (a.data || []).map(x => ({ at: x.at, actor: name[x.actor] || '—', action: `${x.action} ${x.entity}`, detail: '' })),
     potenciales: r.data?.payload?.potenciales || cat.potenciales,
@@ -83,7 +91,7 @@ export async function serverData(cat) {
 }
 
 // ── Vista ────────────────────────────────────────────────────────────────
-const st = { quien: 'todos', dias: 90, estado: 'abiertos', todos: false };
+const st = { quien: 'todos', dias: 90, estado: 'negociando', todos: false };
 
 export function renderPanel(view, D, cat, { onPublish } = {}) {
   const color = Object.fromEntries(D.people.map((u, i) => [u.id, SERIE[i % SERIE.length]]));
@@ -98,7 +106,7 @@ export function renderPanel(view, D, cat, { onPublish } = {}) {
   const ganado = Q.filter(q => q.status === 'aceptado' && q.total_amount != null).reduce((s, q) => s + +q.total_amount, 0);
 
   // Embudo
-  const embudo = [['Enviados', enviados], ['Negociándose', n('negociando')], ['Aceptados', n('aceptado')], ['Perdidos', n('perdido')]];
+  const embudo = [['Enviados', enviados], ['Negociándose', n('negociando')], ['Pedidos', n('aceptado')], ['Perdidos', n('perdido')]];
   const maxE = Math.max(1, ...embudo.map(x => x[1]));
 
   // Semanas (12) apiladas por comercial
@@ -140,7 +148,7 @@ export function renderPanel(view, D, cat, { onPublish } = {}) {
   const addTot = E.filter(e => e.action === 'anadida').length, showTot = E.filter(e => e.action === 'mostrada').length;
 
   // Presupuestos del equipo
-  const LST = { abiertos: q => ['enviado', 'negociando'].includes(q.status), atrasados: q => atrasados.includes(q), aceptado: q => q.status === 'aceptado', perdido: q => q.status === 'perdido', todos: () => true };
+  const LST = { enviado: q => q.status === 'enviado', negociando: q => q.status === 'negociando', aceptado: q => q.status === 'aceptado', perdido: q => q.status === 'perdido', atrasados: q => atrasados.includes(q), todos: () => true };
   const lista = Q.filter(LST[st.estado]).sort((a, b) => (a.follow_up || '9').localeCompare(b.follow_up || '9'));
   const total = lista.length, visibles = st.todos ? lista : lista.slice(0, 12);
 
@@ -156,8 +164,8 @@ export function renderPanel(view, D, cat, { onPublish } = {}) {
   <section class="kpis">
     ${kpi('Enviados', enviados, 'presupuestos con catálogo enviado')}
     ${kpi('Negociándose', n('negociando'), enJuego ? eur(enJuego) + ' compartido en juego' : 'sin importes compartidos')}
-    ${kpi('Aceptados', n('aceptado'), ganado ? eur(ganado) + ' compartido' : '&nbsp;')}
-    ${kpi('Tasa de cierre', pct(n('aceptado'), n('aceptado') + n('perdido')), 'aceptados ÷ (aceptados + perdidos)')}
+    ${kpi('Pedidos', n('aceptado'), ganado ? eur(ganado) + ' compartido' : '&nbsp;')}
+    ${kpi('Tasa de cierre', pct(n('aceptado'), n('aceptado') + n('perdido')), 'pedidos ÷ (pedidos + perdidos)')}
     ${kpi('Seguimientos atrasados', atrasados.length, atrasados.length ? 'llamadas, emails o visitas sin hacer' : 'al día', atrasados.length ? 'warn' : '')}
     ${kpi('Venta cruzada añadida', pct(addTot, showTot), `${addTot} de ${showTot} propuestas · no es venta cerrada`)}
   </section>
@@ -173,7 +181,7 @@ export function renderPanel(view, D, cat, { onPublish } = {}) {
   </div>
 
   <section class="card pn-card"><h2>Por comercial</h2><p class="muted small">Pulsa una fila para ver solo a esa persona.</p>
-    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Comercial</th><th>Presupuestos</th><th>Enviados</th><th>Negociándose</th><th>Aceptados</th><th>Perdidos</th><th>Cierre</th><th>Acciones hechas</th><th>Atrasados</th><th>Venta cruzada añadida</th></tr></thead>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Comercial</th><th>Presupuestos</th><th>Enviados</th><th>Negociándose</th><th>Pedidos</th><th>Perdidos</th><th>Cierre</th><th>Acciones hechas</th><th>Atrasados</th><th>Venta cruzada añadida</th></tr></thead>
     <tbody>${filas.map(f => `<tr data-u="${f.u.id}" class="${st.quien === f.u.id ? 'sel' : ''}"><td><i class="dot" style="background:${color[f.u.id]}"></i>${esc(f.u.full_name)}</td><td>${f.total}</td><td>${f.env}</td><td>${f.neg}</td><td>${f.ac}</td><td>${f.pe}</td><td>${f.cierre}</td><td>${f.acciones}</td><td class="${f.tarde ? 'warn' : ''}">${f.tarde}</td><td>${f.xs}</td></tr>`).join('')}</tbody></table></div>
   </section>
 
@@ -189,13 +197,15 @@ export function renderPanel(view, D, cat, { onPublish } = {}) {
     </section>
   </div>
 
-  <section class="card pn-card"><h2>Presupuestos del equipo</h2>
-    <div class="chips">${[['abiertos', 'Abiertos'], ['atrasados', 'Seguimiento atrasado'], ['aceptado', 'Aceptados'], ['perdido', 'Perdidos'], ['todos', 'Todos']].map(([k, t]) => `<button class="chip${st.estado === k ? ' on' : ''}" data-e="${k}">${t} <span>${Q.filter(LST[k]).length}</span></button>`).join('')}</div>
-    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Comercial</th><th>Oferta</th><th>Fecha</th><th>Estado</th><th>Próxima acción</th><th>Hechas</th><th>Cliente</th><th>Importe</th><th>Líneas</th></tr></thead>
-    <tbody>${visibles.map(q => `<tr><td><i class="dot" style="background:${color[q.owner_id]}"></i>${esc(q.full_name.split(' ')[0])}</td><td class="mono">${esc(q.offer_number || '—')}</td><td>${fmt(q.quote_date)}</td>
+  <section class="card pn-card"><h2>Ofertas por estado</h2><p class="muted small">Pulsa una oferta para ver todas sus líneas.</p>
+    <div class="chips">${[['enviado', 'Enviadas'], ['negociando', 'Negociándose'], ['aceptado', 'Pedidos'], ['perdido', 'Perdidas'], ['atrasados', 'Seguimiento atrasado'], ['todos', 'Todas']].map(([k, t]) => `<button class="chip${st.estado === k ? ' on' : ''}" data-e="${k}">${t} <span>${Q.filter(LST[k]).length}</span></button>`).join('')}</div>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Comercial</th><th>Oferta</th><th>Fecha</th><th>Estado</th><th>Próxima acción</th><th>Hechas</th><th>Qué se ofrece</th><th>Cliente</th><th>Importe</th></tr></thead>
+    <tbody>${visibles.map(q => `<tr class="pn-q" data-q="${q.id}" tabindex="0" aria-expanded="${st.abierta === q.id}"><td><i class="dot" style="background:${color[q.owner_id]}"></i>${esc(q.full_name.split(' ')[0])}</td><td class="mono">${esc(q.offer_number || '—')}</td><td>${fmt(q.quote_date)}</td>
       <td><span class="pill ${q.status === 'aceptado' ? 'pill-ok' : q.status === 'perdido' ? 'pill-none' : 'pill-warn'}">${QST[q.status]}</span></td>
       <td class="${q.follow_up && q.follow_up < hoy && ['enviado', 'negociando'].includes(q.status) ? 'warn' : ''}">${q.next_action ? `${q.next_action} · ${fmt(q.follow_up)}` : '—'}</td><td>${q.actions_done || 0}</td>
-      <td>${q.client_label ? esc(q.client_label) : '<span class="muted small">no compartido</span>'}</td><td>${q.total_amount != null ? eur(q.total_amount) : '<span class="muted small">—</span>'}</td><td>${q.lines_count}${q.extras_count ? ` <span class="muted small">+${q.extras_count}</span>` : ''}</td></tr>`).join('')}</tbody></table></div>
+      <td class="pn-prod">${resumen(q)}</td>
+      <td>${q.client_label ? esc(q.client_label) : '<span class="muted small">no compartido</span>'}</td><td>${q.total_amount != null ? eur(q.total_amount) : '<span class="muted small">—</span>'}</td></tr>
+      ${st.abierta === q.id ? `<tr class="pn-lines"><td colspan="9"><ul class="pr-list">${(q.lines || []).map(l => `<li><span class="pr-q">${l.quantity ? +l.quantity + ' ×' : ''}</span><span class="pr-n">${esc(l.product_name || '—')}${l.is_extra ? ' <span class="muted small">· venta cruzada</span>' : ''}</span><span class="pr-r mono">${esc(l.ref || '')}</span></li>`).join('') || '<li class="muted">Sin líneas</li>'}</ul></td></tr>` : ''}`).join('')}</tbody></table></div>
     ${total > 12 ? `<div class="row-end"><button class="lnk" id="pn-mas">${st.todos ? 'Ver menos' : `Ver los ${total}`}</button></div>` : ''}
   </section>
 
@@ -215,6 +225,8 @@ export function renderPanel(view, D, cat, { onPublish } = {}) {
   view.querySelector('#pn-dias').onchange = e => { st.dias = +e.target.value; again(); };
   view.querySelectorAll('[data-u]').forEach(r => r.onclick = () => { st.quien = st.quien === r.dataset.u ? 'todos' : r.dataset.u; again(); });
   view.querySelectorAll('[data-e]').forEach(b => b.onclick = () => { st.estado = b.dataset.e; again(); });
+  view.querySelectorAll('.pn-q').forEach(r => { const t = () => { st.abierta = st.abierta === r.dataset.q ? null : r.dataset.q; again(); };
+    r.onclick = t; r.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } }; });
   view.querySelector('#pn-mas')?.addEventListener('click', () => { st.todos = !st.todos; again(); });
   view.querySelector('#pn-csv').onclick = () => descargarCSV(Q, D);
   view.querySelector('#pot-pub').onclick = async () => {
@@ -227,6 +239,10 @@ export function renderPanel(view, D, cat, { onPublish } = {}) {
   tooltips(view);
 }
 
+function resumen(q) {
+  const ls = q.lines || []; if (!ls.length) return `<span class="muted small">${q.lines_count} líneas</span>`;
+  return `${esc(ls[0].product_name || ls[0].ref || '—')}${ls.length > 1 ? ` <span class="muted small">+ ${ls.length - 1} más</span>` : ''}`;
+}
 function kpi(t, v, sub, cls = '') { return `<div class="kpi card ${cls}"><span class="kpi-t">${t}</span><b class="kpi-v">${v}</b><span class="kpi-s">${sub}</span></div>`; }
 
 function weekChart(pila, wk, quienes, color, max) {

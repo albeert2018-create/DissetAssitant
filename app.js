@@ -19,7 +19,7 @@ const ST = {
 let cat, matcher, mixa, perfil, quote = null, openFix = null;
 let me = null, remote = false;   // usuario conectado (perfil del servidor) y si hay servidor configurado
 const QST = { en_preparacion: 'En preparación', catalogo_generado: 'Catálogo generado', enviado: 'Enviado',
-  negociando: 'Negociándose', aceptado: 'Aceptado', perdido: 'Perdido' };
+  negociando: 'Negociándose', aceptado: 'Pedido', perdido: 'Perdido' };   // «aceptado» se muestra como «Pedido»
 const AGENDA_ST = ['enviado', 'negociando', 'aceptado', 'perdido'];
 
 const FRASES = {
@@ -187,11 +187,13 @@ function route() {
   if ((m = h.match(/^#\/q\/([\w-]+)/))) return showLines(m[1]);
   if (h.startsWith('#/historial')) return showHistory();
   if (h.startsWith('#/agenda')) return showAgenda();
+  if (h.startsWith('#/pedidos')) return showPedidos();
   if (h.startsWith('#/panel')) return showPanel();
   return showHome();
 }
 function nav(active) {
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('active', a.dataset.nav === active));
+  db.all('quotes').then(qs => { const n = qs.filter(q => q.status === 'aceptado').length, b = $('#n-pedidos'); if (b) { b.textContent = n; b.hidden = !n; } });
 }
 
 // ── Portada ───────────────────────────────────────────────────────────────
@@ -552,9 +554,9 @@ async function showAgenda() {
   const rec = await recordatorios();
   const G = ['Atrasadas', 'Hoy', 'Mañana', 'Esta semana', 'Más adelante'];
   const porDia = G.map(g => [g, rec.filter(x => cuando(x.t.fecha) === g)]).filter(([, xs]) => xs.length);
-  const FIL = [['activos', 'Abiertos'], ['por_enviar', 'Por enviar'], ['enviado', 'Enviados'], ['negociando', 'Negociándose'], ['aceptado', 'Aceptados'], ['perdido', 'Perdidos']];
+  const FIL = [['activos', 'Abiertos'], ['por_enviar', 'Por enviar'], ['enviado', 'Enviados'], ['negociando', 'Negociándose'], ['aceptado', 'Pedidos'], ['perdido', 'Perdidos']];
   view.innerHTML = `<div class="bar"><div><p class="kicker">Seguimiento comercial</p><h1>Mi agenda</h1>
-    <p class="muted">${n('enviado')} enviados · ${n('negociando')} negociándose · ${n('aceptado')} aceptados · ${n('perdido')} perdidos</p></div>
+    <p class="muted">${n('enviado')} enviados · ${n('negociando')} negociándose · ${n('aceptado')} pedidos · ${n('perdido')} perdidos</p></div>
     <div class="bar-actions">${remote ? '<span class="muted small">Dirección ve estados y fechas; el cliente y el importe solo si marcas «compartir».</span>' : '<span class="muted small">Se guarda en este ordenador.</span>'}</div></div>
     <section class="card rec" aria-label="Recordatorios"><h2>Recordatorios</h2>
       ${porDia.length ? porDia.map(([g, xs]) => `<div class="rec-g"><h3 class="${g === 'Atrasadas' ? 'late' : g === 'Hoy' ? 'today' : ''}">${g} <span>${xs.length}</span></h3>
@@ -566,7 +568,7 @@ async function showAgenda() {
     </section>
     <div class="chips" role="tablist">${FIL.map(([k, t]) => `<button role="tab" class="chip${agendaFiltro === k ? ' on' : ''}" aria-selected="${agendaFiltro === k}" data-f="${k}">${t} <span>${n(k)}</span></button>`).join('')}</div>
     <div class="ag-list">${lista.length ? lista.map(agRow).join('') : '<div class="card"><p class="muted">Nada por aquí.</p></div>'}</div>`;
-  view.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { agendaFiltro = b.dataset.f; showAgenda(); });
+  view.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { if (b.dataset.f === 'aceptado') { location.hash = '#/pedidos'; return; } agendaFiltro = b.dataset.f; showAgenda(); });
   view.querySelectorAll('[data-go]').forEach(a => a.onclick = e => { e.preventDefault(); agendaFiltro = 'activos'; document.getElementById('ag-' + a.dataset.go)?.scrollIntoView({ behavior: 'smooth' }); });
   view.querySelector('.rec').addEventListener('click', agClick);
   view.querySelector('.ag-list').addEventListener('click', agClick);
@@ -604,7 +606,8 @@ async function agClick(e) {
   if (b.dataset.st) {
     quote.status = quote.status === b.dataset.st ? 'catalogo_generado' : b.dataset.st;
     if (quote.status === 'enviado' && !pendiente(quote)) programar(quote, 'llamada', 3);   // 1ª llamada a los 3 días laborables
-    if (quote.status === 'aceptado') mixa.say('¡Aceptado! Eso sí que es un buen palé.');
+    if (quote.status === 'aceptado') { quote.agenda.pedidoEl = hoy(); mixa.say('¡Pedido! Lo guardo en la carpeta Pedidos.'); }
+    else delete quote.agenda.pedidoEl;
   } else if (b.dataset.act === 'hecha') {
     const t = quote.agenda.tareas.find(x => x.id === (b.closest('[data-t]')?.dataset.t)) || pendiente(quote);
     if (!t) return;
@@ -629,6 +632,41 @@ async function agChange(e) {
   else quote.agenda[k] = k === 'importe' ? (v === '' ? null : +v) : v;
   syncSeg(quote); await persist();
   if (['tipo', 'fecha'].includes(k) || k.startsWith('compartir')) showAgenda();
+}
+
+// ── Carpeta «Pedidos»: ofertas que han salido bien ────────────────────────
+let pedQ = '';
+async function showPedidos() {
+  nav('pedidos'); document.title = 'Pedidos · Disset Odiseo';
+  mixa.setPhrases(['Esto es lo que de verdad cuenta. ¡Bien hecho!', 'Desde aquí puedes volver a abrir una oferta si te has equivocado.']);
+  const todos = (await db.all('quotes')).filter(q => q.status === 'aceptado')
+    .sort((a, b) => (b.agenda?.pedidoEl || b.updatedAt).localeCompare(a.agenda?.pedidoEl || a.updatedAt));
+  const t = normText(pedQ);
+  const qs = t ? todos.filter(q => normText([q.offer, q.agenda?.cliente, ...productos(q).map(x => x.name + ' ' + x.ref)].join(' ')).includes(t)) : todos;
+  const mes = hoy().slice(0, 7), esteMes = todos.filter(q => (q.agenda?.pedidoEl || '').startsWith(mes)).length;
+  view.innerHTML = `<div class="bar"><div><p class="kicker">Ofertas que han salido bien</p><h1>Pedidos</h1>
+    <p class="muted">${todos.length} pedido${todos.length === 1 ? '' : 's'} · ${esteMes} este mes</p></div>
+    <div class="bar-actions"><a class="btn ghost" href="#/agenda">Volver a la agenda</a></div></div>
+    ${todos.length ? `<div class="hist-search"><input type="search" id="pq" value="${esc(pedQ)}" placeholder="Buscar por nº de oferta, cliente, producto o código" aria-label="Buscar pedidos">${t ? `<span class="muted small">${qs.length} encontrado${qs.length === 1 ? '' : 's'}</span>` : ''}</div>` : ''}
+    <div class="ped-list">${qs.length ? qs.map(q => `<article class="card ped" data-id="${q.id}">
+      <div class="ag-head"><a class="ag-title" href="#/q/${q.id}">Oferta ${esc(q.offer || 'sin número')}</a>
+        <span class="muted small">Pedido el ${fmt(q.agenda?.pedidoEl || q.updatedAt.slice(0, 10))} · oferta del ${esc(q.date || '')}${q.agenda?.cliente ? ' · ' + esc(q.agenda.cliente) : ''}</span>
+        <span class="pill pill-ok">Pedido</span></div>
+      ${productosHTML(q)}
+      <details class="ag-notas"><summary>Notas del cliente <span class="muted">(${(q.notas || []).length})</span></summary>${notasHTML(q, true)}</details>
+      <div class="row-end"><button class="lnk muted" data-reabrir="${q.id}">Devolver a negociación</button></div>
+    </article>`).join('')
+      : `<div class="card"><p class="muted">${t ? 'Nada coincide con la búsqueda.' : 'Aún no hay pedidos. Cuando una oferta salga bien, pulsa «Pedido» en la agenda y aparecerá aquí.'}</p></div>`}</div>`;
+  const pq = $('#pq');
+  pq?.addEventListener('input', () => { pedQ = pq.value; clearTimeout(pq._t); pq._t = setTimeout(async () => { await showPedidos(); const n = $('#pq'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 250); });
+  view.querySelectorAll('[data-notas]').forEach(bindNotas);
+  view.querySelectorAll('[data-reabrir]').forEach(b => b.onclick = async () => {
+    if (!confirm('¿Devolver esta oferta a «Negociándose»? Saldrá de Pedidos y volverá a la agenda.')) return;
+    quote = await db.get('quotes', b.dataset.reabrir); tareas(quote);
+    quote.status = 'negociando'; delete quote.agenda.pedidoEl;
+    if (!pendiente(quote)) programar(quote, 'llamada', 1);
+    syncSeg(quote); await persist(); showPedidos();
+  });
 }
 
 // ── Lo que se vende en cada oferta (para la agenda) ───────────────────────
