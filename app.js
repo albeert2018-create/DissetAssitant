@@ -1,5 +1,5 @@
-import { db, saveQuote, exportBackup, importBackup, MAX_QUOTES } from './db.js';
-import { esc, uuid, normRef } from './util.js';
+import { db, saveQuote, exportBackup, importBackup, MAX_QUOTES, protegerAlmacen } from './db.js';
+import { esc, uuid, normRef, normText } from './util.js';
 import { Catalog } from './catalog.js';
 import { Matcher, STATUS, correctionKey } from './matcher.js';
 import { readQuote } from './reader.js';
@@ -32,7 +32,7 @@ const FRASES = {
     'Un roll sin rampa es medio pedido.', 'Las dos de dirección van en la 1 y la 3. Las otras, por puntos.', 'El % es lo que encaja, no lo que se va a vender.'],
   agenda: ['Lo que no se sigue, no se cierra.', 'Pon fecha al próximo seguimiento y yo te lo recuerdo aquí.',
     'El nombre del cliente se queda en tu ordenador salvo que marques compartir.'],
-  hist: ['Aquí guardo tus últimos 60 presupuestos. Solo en este ordenador.', 'Haz una copia de vez en cuando. Yo tengo siete vidas; tus datos, una.'],
+  hist: ['Aquí guardo todos tus presupuestos, en este ordenador. Los abiertos no se borran nunca.', 'Haz una copia de vez en cuando. Yo tengo siete vidas; tus datos, una.'],
 };
 
 // ── Arranque ──────────────────────────────────────────────────────────────
@@ -60,6 +60,7 @@ async function init() {
     syncNow();
   }
   userChip();
+  protegerAlmacen();
   const pn = $('a[data-nav=panel]');
   if (pn) { pn.hidden = remote && !auth.isAdmin(me); if (!remote) pn.textContent = 'Dirección (demo)'; }
   window.addEventListener('hashchange', route);
@@ -303,10 +304,12 @@ async function showLines(id) {
       <a class="btn ghost" href="#/q/${quote.id}/catalogo">Ver catálogo</a>
       <a class="btn" href="#/q/${quote.id}/venta">Venta cruzada${quote.extras?.length ? ` · ${quote.extras.length}` : ''} ›</a></div></div>
   <div class="card lines" id="lines">${rows}</div>
+  ${notasHTML(quote)}
   <p class="muted small">Leído por ${esc(quote.strategy || '—')} · descartadas en local: ${quote.stats?.descartadas || 0} líneas de precios/condiciones y ${quote.stats?.personales || 0} con datos del cliente.</p>`;
   $('#offer').addEventListener('change', e => { quote.offer = e.target.value.trim(); persist(); });
   $('#date').addEventListener('change', e => { quote.date = e.target.value.trim(); persist(); });
   $('#lines').addEventListener('click', onLineClick);
+  bindNotas(view.querySelector('[data-notas]'));
   $('#lines').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('.fix-input')) { e.preventDefault(); doSearch(); } });
   if (openFix) { const inp = $('.fix-input'); inp?.focus(); inp?.select(); if (inp?.value) doSearch(); }
 }
@@ -556,7 +559,7 @@ async function showAgenda() {
     <section class="card rec" aria-label="Recordatorios"><h2>Recordatorios</h2>
       ${porDia.length ? porDia.map(([g, xs]) => `<div class="rec-g"><h3 class="${g === 'Atrasadas' ? 'late' : g === 'Hoy' ? 'today' : ''}">${g} <span>${xs.length}</span></h3>
         ${xs.map(({ q, t }) => `<div class="rec-i" data-id="${q.id}" data-t="${t.id}"><span class="rec-d">${fmt(t.fecha)}</span>
-          <span class="rec-what"><b>${nombreTarea(q, t)}</b> · <a href="#ag-${q.id}" data-go="${q.id}">Oferta ${esc(q.offer || 'sin número')}</a>${q.agenda?.cliente ? ' · ' + esc(q.agenda.cliente) : ''}</span>
+          <span class="rec-what"><b>${nombreTarea(q, t)}</b> · <a href="#ag-${q.id}" data-go="${q.id}">Oferta ${esc(q.offer || 'sin número')}</a>${q.agenda?.cliente ? ' · ' + esc(q.agenda.cliente) : ''}<span class="rec-prod">${resumenProductos(q)}</span></span>
           <span class="pill ${q.status === 'negociando' ? 'pill-warn' : 'pill-none'}">${QST[q.status] || ''}</span>
           <button class="btn ghost xs-small" data-act="hecha">✓ Hecha</button></div>`).join('')}</div>`).join('')
       : '<p class="muted">No tienes acciones pendientes. Marca un presupuesto como «Enviado» y te programo la primera llamada.</p>'}
@@ -568,6 +571,7 @@ async function showAgenda() {
   view.querySelector('.rec').addEventListener('click', agClick);
   view.querySelector('.ag-list').addEventListener('click', agClick);
   view.querySelector('.ag-list').addEventListener('change', agChange);
+  view.querySelectorAll('[data-notas]').forEach(bindNotas);
 }
 function agRow(q) {
   const a = q.agenda || {}, t = pendiente(q), hechas = tareas(q).filter(x => x.hecha);
@@ -576,6 +580,7 @@ function agRow(q) {
     <div class="ag-head"><a class="ag-title" href="#/q/${q.id}">Oferta ${esc(q.offer || 'sin número')}</a>
       <span class="muted small">${esc(q.date || '')} · ${q.lines.filter(l => l.include !== false).length} líneas${q.extras?.length ? ` · ${q.extras.length} de venta cruzada` : ''}</span>
       <span class="pill ${q.status === 'aceptado' ? 'pill-ok' : q.status === 'perdido' ? 'pill-none' : 'pill-warn'}">${QST[q.status] || q.status}</span></div>
+    ${productosHTML(q)}
     <div class="ag-st" role="group" aria-label="Estado">${AGENDA_ST.map(s => `<button class="seg${q.status === s ? ' on' : ''}" data-st="${s}" aria-pressed="${q.status === s}">${QST[s]}</button>`).join('')}</div>
     ${cerrado(q) ? '' : t ? `<div class="ag-next${tarde ? ' late' : ''}" data-t="${t.id}"><span class="ag-lbl">Próxima acción: <b>${nombreTarea(q, t)}</b></span>
         <select data-k="tipo" aria-label="Tipo">${Object.keys(TIPOS).map(k => `<option value="${k}"${k === t.tipo ? ' selected' : ''}>${k[0].toUpperCase() + k.slice(1)}</option>`).join('')}</select>
@@ -584,6 +589,7 @@ function agRow(q) {
         <label class="ag-chk">Siguiente a los <select data-k="intervalo">${[2, 3, 5, 7, 10, 15].map(d => `<option${d === (a.intervalo || 3) ? ' selected' : ''}>${d}</option>`).join('')}</select> días</label></div>`
       : `<div class="ag-next"><span class="ag-lbl muted">Sin acción pendiente</span><button class="btn ghost" data-act="nueva">+ Programar llamada</button></div>`}
     ${hechas.length ? `<div class="ag-hist">${hechas.map(h => `<span class="done">✓ ${nombreTarea(q, h)} · ${fmt(h.hechaEl || h.fecha)}</span>`).join('')}</div>` : ''}
+    <details class="ag-notas"${(q.notas || []).length ? '' : ''}><summary>Notas del cliente <span class="muted">(${(q.notas || []).length})</span>${(q.notas || []).length ? ` <span class="nota-prev">· ${esc(q.notas.at(-1).texto.slice(0, 80))}${q.notas.at(-1).texto.length > 80 ? '…' : ''}</span>` : ''}</summary>${notasHTML(q, true)}</details>
     <div class="ag-fields">
       <label class="fld-col">Cliente<input data-k="cliente" value="${esc(a.cliente || '')}" maxlength="80" placeholder="Solo en este ordenador"></label>
       <label class="ag-chk"><input type="checkbox" data-k="compartirCliente" ${a.compartirCliente ? 'checked' : ''}> Compartir con dirección</label>
@@ -625,18 +631,99 @@ async function agChange(e) {
   if (['tipo', 'fecha'].includes(k) || k.startsWith('compartir')) showAgenda();
 }
 
+// ── Lo que se vende en cada oferta (para la agenda) ───────────────────────
+function productos(q) {
+  const ls = q.lines.filter(l => l.include !== false).map(l => {
+    const p = l.match?.pi != null ? cat.product(l.match.pi) : null;
+    return { group: l.group || '', ref: l.ref || '', qty: l.qty, name: p ? p.name : (l.title || l.text || '').slice(0, 80) };
+  });
+  for (const e of q.extras || []) { const p = cat.product(e.pi); if (p) ls.push({ group: 'Venta cruzada', ref: e.ref || '', qty: null, name: p.name }); }
+  return ls;
+}
+function resumenProductos(q) {
+  const ps = productos(q); if (!ps.length) return '';
+  return `${esc(ps[0].name)}${ps.length > 1 ? ` <span class="muted">+ ${ps.length - 1} más</span>` : ''}`;
+}
+function productosHTML(q) {
+  const ps = productos(q); if (!ps.length) return '';
+  let g = null;
+  const fila = x => { let o = ''; if (x.group !== g) { g = x.group; if (g) o += `<li class="pr-g">${esc(g)}</li>`; }
+    return o + `<li><span class="pr-q">${x.qty ? x.qty + ' ×' : ''}</span><span class="pr-n">${esc(x.name)}</span><span class="pr-r mono">${esc(x.ref)}</span></li>`; };
+  const prim = ps.slice(0, 6).map(fila).join(''), resto = ps.slice(6);
+  return `<div class="ag-prod"><span class="ag-lbl">Qué le ofreces</span><ul class="pr-list">${prim}</ul>
+    ${resto.length ? `<details class="pr-more"><summary>Ver ${resto.length} más</summary><ul class="pr-list">${resto.map(fila).join('')}</ul></details>` : ''}</div>`;
+}
+
+// ── Notas del cliente: solo en este ordenador (pueden llevar datos del cliente) ───
+const fmtAt = t => { const d = new Date(t); return `${d.toLocaleDateString('es-ES')} ${d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}`; };
+function notasHTML(q, compacto = false) {
+  const ns = q.notas || [];
+  return `<section class="${compacto ? '' : 'card '}notas" data-notas="${q.id}">
+    ${compacto ? '' : `<div class="notas-h"><h2>Notas del cliente</h2><span class="muted small">Solo en este ordenador · no se envían a dirección ni salen en el catálogo</span></div>`}
+    <div class="nota-new"><textarea rows="2" maxlength="2000" aria-label="Nueva nota" placeholder="Lo que te ha dicho el cliente: plazos, colores, medidas, con quién hablar… (Ctrl+Intro para guardar)"></textarea>
+      <button class="btn" type="button" data-nota="add">Añadir nota</button></div>
+    ${ns.length ? `<ul class="nota-list">${[...ns].reverse().map(n => `<li data-n="${n.id}"><span class="nota-at">${fmtAt(n.at)}</span><p>${esc(n.texto)}</p><button class="lnk muted" type="button" data-nota="del" aria-label="Borrar esta nota">Borrar</button></li>`).join('')}</ul>`
+      : `<p class="muted small nota-vacia">Sin notas todavía.</p>`}
+  </section>`;
+}
+function bindNotas(sec) {
+  if (!sec) return;
+  const compacto = !sec.classList.contains('card');
+  const guardar = async () => {
+    const ta = sec.querySelector('textarea'), texto = ta.value.trim();
+    if (!texto) { ta.focus(); return; }
+    const q = await db.get('quotes', sec.dataset.notas);
+    (q.notas ||= []).push({ id: uuid(), at: new Date().toISOString(), texto });
+    await saveQuote(q); if (quote?.id === q.id) quote.notas = q.notas;
+    redraw(q);
+    mixa.say('Apuntado. Lo tendrás aquí cuando vuelvas a llamar.');
+  };
+  const redraw = q => {
+    const tmp = document.createElement('div'); tmp.innerHTML = notasHTML(q, compacto);
+    const nuevo = tmp.firstElementChild; sec.replaceWith(nuevo); bindNotas(nuevo);
+    const sum = nuevo.closest('details')?.querySelector('summary');
+    if (sum) sum.innerHTML = `Notas del cliente <span class="muted">(${q.notas.length})</span>${q.notas.length ? ` <span class="nota-prev">· ${esc(q.notas.at(-1).texto.slice(0, 80))}${q.notas.at(-1).texto.length > 80 ? '…' : ''}</span>` : ''}`;
+  };
+  sec.addEventListener('click', async e => {
+    const b = e.target.closest('[data-nota]'); if (!b) return;
+    e.stopPropagation();
+    if (b.dataset.nota === 'add') return guardar();
+    if (b.dataset.nota === 'del' && confirm('¿Borrar esta nota?')) {
+      const q = await db.get('quotes', sec.dataset.notas);
+      q.notas = (q.notas || []).filter(n => n.id !== b.closest('[data-n]').dataset.n);
+      await saveQuote(q); if (quote?.id === q.id) quote.notas = q.notas;
+      redraw(q);
+    }
+  });
+  sec.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.target.matches('textarea')) { e.preventDefault(); guardar(); } });
+  sec.addEventListener('change', e => e.stopPropagation());
+}
+
 // ── Mis presupuestos ──────────────────────────────────────────────────────
+let histQ = '', histN = 100;
 async function showHistory() {
   nav('hist'); mixa.setPhrases(FRASES.hist); document.title = 'Mis presupuestos · Disset Odiseo';
-  const qs = (await db.all('quotes')).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const todos = (await db.all('quotes')).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const alm = await protegerAlmacen();
+  const t = normText(histQ);
+  const qs = t ? todos.filter(q => normText([q.offer, q.date, q.agenda?.cliente, ...productos(q).map(x => x.name + ' ' + x.ref)].join(' ')).includes(t)) : todos;
+  const vis = qs.slice(0, histN);
   view.innerHTML = `<div class="bar"><div><p class="kicker">Guardado en este ordenador</p><h1>Mis presupuestos</h1>
-    <p class="muted">${qs.length} de ${MAX_QUOTES} como máximo · se guardan solos mientras trabajas</p></div>
+    <p class="muted">${todos.length} presupuesto${todos.length === 1 ? '' : 's'} · se guardan solos mientras trabajas${alm?.cuota ? ` · ocupan ${(alm.usado / 1048576).toFixed(1)} MB` : ''}</p></div>
     <div class="bar-actions"><button class="btn ghost" id="exp">Descargar copia</button>
       <label class="btn ghost">Importar copia<input type="file" id="imp" accept="application/json" hidden></label>
       <button class="btn ghost danger" id="reset">Empezar de nuevo</button></div></div>
-    <div class="card">${qs.length ? qs.map(q => `<div class="recent-row"><a href="#/q/${q.id}">Oferta ${esc(q.offer || 'sin número')} <span class="muted">· ${esc(q.date || '')} · ${q.lines.length} líneas</span></a>
-      <span class="muted small">${esc(q.status.replace('_', ' '))}</span><button class="lnk muted" data-del="${q.id}">Borrar</button></div>`).join('')
-      : '<p class="muted">Todavía no hay presupuestos.</p>'}</div>`;
+    <div class="hist-search"><input type="search" id="hq" value="${esc(histQ)}" placeholder="Buscar por nº de oferta, cliente, producto o código" aria-label="Buscar presupuestos">
+      ${t ? `<span class="muted small">${qs.length} encontrado${qs.length === 1 ? '' : 's'}</span>` : ''}</div>
+    <div class="card">${vis.length ? vis.map(q => `<div class="recent-row"><a href="#/q/${q.id}">Oferta ${esc(q.offer || 'sin número')} <span class="muted">· ${esc(q.date || '')} · ${q.lines.length} líneas${q.notas?.length ? ` · ${q.notas.length} nota${q.notas.length > 1 ? 's' : ''}` : ''}${q.agenda?.cliente ? ' · ' + esc(q.agenda.cliente) : ''}</span>
+      <span class="hist-prod">${resumenProductos(q)}</span></a>
+      <span class="muted small">${QST[q.status] || esc(q.status)}</span><button class="lnk muted" data-del="${q.id}">Borrar</button></div>`).join('')
+      : `<p class="muted">${t ? 'Nada coincide con la búsqueda.' : 'Todavía no hay presupuestos.'}</p>`}
+      ${qs.length > vis.length ? `<div class="row-end"><button class="lnk" id="hmas">Ver ${Math.min(100, qs.length - vis.length)} más</button></div>` : ''}</div>
+    <p class="muted small">Hasta ${MAX_QUOTES.toLocaleString('es-ES')} presupuestos en este ordenador. Los abiertos no se borran nunca; si algún día se llegara al máximo, solo se quitarían los aceptados o perdidos más antiguos. Haz «Descargar copia» de vez en cuando.</p>`;
+  const hq = $('#hq');
+  hq.addEventListener('input', () => { histQ = hq.value; histN = 100; clearTimeout(hq._t); hq._t = setTimeout(async () => { await showHistory(); const n = $('#hq'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 250); });
+  $('#hmas')?.addEventListener('click', () => { histN += 100; showHistory(); });
   $('#exp').onclick = async () => {
     const blob = new Blob([JSON.stringify(await exportBackup())], { type: 'application/json' });
     const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `disset-copia-${new Date().toISOString().slice(0, 10)}.json` });

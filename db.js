@@ -4,13 +4,20 @@ const DB_VERSION = 1;
 const STORES = {
   products: { keyPath: 'id' },
   variants: { keyPath: 'id' },
-  quotes: { keyPath: 'id' },          // borradores locales (máx. 60)
+  quotes: { keyPath: 'id' },          // presupuestos locales (máx. MAX_QUOTES; los abiertos nunca se borran)
   corrections: { keyPath: 'key' },    // ref leída → variante elegida
   learning: { keyPath: 'key' },       // añadidos/descartados por contexto
   outbox: { keyPath: 'id' },          // cola de sincronización
   meta: { keyPath: 'key' },
 };
-export const MAX_QUOTES = 60;
+export const MAX_QUOTES = 5000;
+const CERRADO = q => q.status === 'aceptado' || q.status === 'perdido';
+
+/** Pide al navegador que no borre estos datos aunque le falte espacio */
+export async function protegerAlmacen() {
+  try { if (navigator.storage?.persist && !(await navigator.storage.persisted())) await navigator.storage.persist(); } catch { /* sin soporte */ }
+  try { const e = await navigator.storage?.estimate?.(); return e ? { usado: e.usage, cuota: e.quota } : null; } catch { return null; }
+}
 
 let _db;
 function open() {
@@ -45,6 +52,7 @@ export const db = {
   put: (store, val) => tx(store, 'readwrite', s => s.put(val)),
   del: (store, key) => tx(store, 'readwrite', s => s.delete(key)),
   clear: (store) => tx(store, 'readwrite', s => s.clear()),
+  count: (store) => tx(store, 'readwrite', s => s.count()),
   bulkPut: (store, vals) => tx(store, 'readwrite', s => { vals.forEach(v => s.put(v)); }),
   async meta(key, val) {
     if (val === undefined) return (await this.get('meta', key))?.value;
@@ -55,8 +63,11 @@ export const db = {
 export async function saveQuote(q) {
   q.updatedAt = new Date().toISOString();
   await db.put('quotes', q);
-  const all = (await db.all('quotes')).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  for (const old of all.slice(MAX_QUOTES)) await db.del('quotes', old.id);
+  if ((await db.count('quotes')) <= MAX_QUOTES) return;                 // lo normal: no hay que limpiar nada
+  // Por encima del máximo: solo se van los cerrados (aceptados/perdidos) más antiguos. Los abiertos nunca.
+  const cerrados = (await db.all('quotes')).filter(CERRADO).sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+  const sobran = (await db.count('quotes')) - MAX_QUOTES;
+  for (const old of cerrados.slice(0, sobran)) await db.del('quotes', old.id);
 }
 
 export async function exportBackup() {
